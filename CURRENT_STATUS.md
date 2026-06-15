@@ -26,9 +26,10 @@ it explains exactly what's working, what's been tested, and what to do next.
   OddsAPI.io, in the same "standard shape" pattern as the MLB Stats API
   fetcher.
 - **Live data is saved to PostgreSQL** —
-  `backend/scripts/save_live_data.py` fetches today's games and current
-  moneyline odds, then saves them into the database (upserting games,
-  inserting new odds snapshots each run).
+  `backend/scripts/save_live_data.py` fetches today's games, probable
+  starting pitchers, current team win/loss records, and current moneyline
+  odds, then saves them into the database (upserting games, starting
+  pitchers, and team records; inserting new odds snapshots each run).
 - **Read-only FastAPI backend** — `backend/main.py` wires together a small
   FastAPI app (`backend/db.py` for the database connection, plus routers in
   `backend/routers/`) with 4 working endpoints, all reading from
@@ -282,6 +283,47 @@ The FastAPI backend is fully working and read-only.
     visual screenshot — verification was done via the checks above
     instead.
 
+- ✅ **`starting_pitchers` and `team_records` now populated (2026-06-15).**
+  Both fetchers already returned this data — `get_todays_games()` already
+  hydrates `probablePitcher` (home/away pitcher names), and
+  `get_team_records()` already returns full win/loss splits for all 30
+  teams. No new API calls or fields were needed; `save_live_data.py` just
+  wasn't saving them yet. Two small functions added, both following the
+  existing UPSERT pattern from `save_games`:
+  - `save_starting_pitchers(cur, saved_games)` — one row per game,
+    `ON CONFLICT (game_id) DO UPDATE`.
+  - `save_team_records(cur, records)` — one row per team/season,
+    `ON CONFLICT (team_id, season) DO UPDATE`, reusing `get_or_create_team`.
+
+  No schema changes — both tables already existed with the right columns
+  and unique constraints.
+
+  **Verified live (2026-06-15):**
+  - `starting_pitchers`: **10 rows** (one per today's game), **10/10**
+    games have at least one probable pitcher announced. 2 games
+    (SD@STL, MIN@TEX) have the away pitcher still `null` ("TBD" from MLB).
+  - `team_records`: **30 rows** (one per team), all 30 teams have
+    non-null win/loss + home/away splits for season 2026.
+  - Example `starting_pitchers` row (MIA @ PHI):
+    ```
+    game_id=16, away_pitcher="Ryan Gusto", home_pitcher="Zack Wheeler"
+    ```
+  - Example `starting_pitchers` row with one pitcher not yet announced
+    (SD @ STL):
+    ```
+    game_id=19, away_pitcher=null, home_pitcher="Dustin May"
+    ```
+  - Example `team_records` row (ATH, 2026):
+    ```
+    wins=35, losses=36, home_wins=15, home_losses=19,
+    away_wins=20, away_losses=17
+    ```
+  - **Side effect (no code change):** `/games/today`'s existing
+    `probable_home_pitcher`/`probable_away_pitcher` fields, previously
+    always `null`, now return real pitcher names — the query already
+    joined `starting_pitchers`, it was just empty before.
+  - No frontend changes, no new endpoints, no edge calculations.
+
 ---
 
 ## 3. Files That Were Created
@@ -518,10 +560,6 @@ only — revisit `backend/routers/games.py` if this becomes a problem.
   no matchups, props, line movement, or parlay pages yet.
 - ❌ No write endpoints, authentication, or cloud deployment — the FastAPI
   backend is local and read-only by design (for now).
-- ❌ `starting_pitchers` and `team_records` tables exist but are empty —
-  `save_live_data.py` currently saves `teams`, `games`, and `odds_history`
-  only, so `probable_home_pitcher`/`probable_away_pitcher` in
-  `/games/today` are always `null` right now.
 - ❌ No line movement *view* yet — `odds_history` now collects a new
   snapshot each time `save_live_data.py` runs, but there's no query or
   chart yet to look at how odds have moved over time.

@@ -115,9 +115,71 @@ def save_games(cur, games):
             "home_team": game["home_team"],
             "away_team": game["away_team"],
             "game_date": game["game_date"],
+            "home_pitcher": game["home_pitcher"],
+            "away_pitcher": game["away_pitcher"],
         })
 
     return saved, saved_games
+
+
+def save_starting_pitchers(cur, saved_games):
+    """Insert or update the probable starting pitchers for each saved game."""
+    saved = 0
+    with_pitchers = 0
+
+    for game in saved_games:
+        cur.execute(
+            """
+            INSERT INTO starting_pitchers (game_id, home_pitcher, away_pitcher)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (game_id) DO UPDATE SET
+                home_pitcher = EXCLUDED.home_pitcher,
+                away_pitcher = EXCLUDED.away_pitcher
+            """,
+            (game["id"], game["home_pitcher"], game["away_pitcher"]),
+        )
+        saved += 1
+        if game["home_pitcher"] or game["away_pitcher"]:
+            with_pitchers += 1
+
+    return saved, with_pitchers
+
+
+def save_team_records(cur, records):
+    """Insert or update each team's current win/loss record."""
+    saved = 0
+
+    for record in records:
+        if not record["team"]:
+            continue
+
+        team_id = get_or_create_team(cur, record["team"])
+
+        cur.execute(
+            """
+            INSERT INTO team_records (
+                team_id, season, wins, losses,
+                home_wins, home_losses, away_wins, away_losses
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (team_id, season) DO UPDATE SET
+                wins = EXCLUDED.wins,
+                losses = EXCLUDED.losses,
+                home_wins = EXCLUDED.home_wins,
+                home_losses = EXCLUDED.home_losses,
+                away_wins = EXCLUDED.away_wins,
+                away_losses = EXCLUDED.away_losses
+            """,
+            (
+                team_id, record["season"],
+                record["wins"] or 0, record["losses"] or 0,
+                record["home_wins"] or 0, record["home_losses"] or 0,
+                record["away_wins"] or 0, record["away_losses"] or 0,
+            ),
+        )
+        saved += 1
+
+    return saved
 
 
 def name_overlap_score(odds_team_name, abbreviation):
@@ -211,6 +273,10 @@ def main():
     games = mlb_stats_api.get_todays_games()
     print(f"  Found {len(games)} games")
 
+    print("Fetching team records from MLB Stats API...")
+    team_records = mlb_stats_api.get_team_records()
+    print(f"  Found {len(team_records)} team records")
+
     print("Fetching moneyline odds from OddsAPI.io...")
     try:
         odds_records = odds_api_io.get_moneyline_odds()
@@ -228,6 +294,8 @@ def main():
     cur = conn.cursor()
 
     games_saved, saved_games = save_games(cur, games)
+    pitchers_saved, games_with_pitchers = save_starting_pitchers(cur, saved_games)
+    records_saved = save_team_records(cur, team_records)
     odds_saved, odds_skipped = save_odds(cur, saved_games, odds_records)
 
     conn.commit()
@@ -236,6 +304,8 @@ def main():
 
     print()
     print(f"Saved {games_saved} games")
+    print(f"Saved {pitchers_saved} starting pitcher rows ({games_with_pitchers} with a probable pitcher)")
+    print(f"Saved {records_saved} team records")
     if odds_skipped:
         print(f"Saved {odds_saved} odds rows ({odds_skipped} skipped - no matching game today)")
     else:

@@ -26,7 +26,7 @@ Focus areas: moneylines, player props, batter vs pitcher matchups, line movement
         - [x] Create PostgreSQL database connection
         - [x] Save teams and games to database
         - [x] Save moneyline odds to database (odds_history table)
-        - [ ] Save starting pitchers and team records to database (not yet built)
+        - [x] Save starting pitchers and team records to database
 - [x] Step 5: Build FastAPI read-only backend
         - [x] Install fastapi + uvicorn
         - [x] Create backend/main.py, backend/db.py, and routers/ (games, odds, teams)
@@ -142,6 +142,18 @@ Focus areas: moneylines, player props, batter vs pitcher matchups, line movement
 > API response (including the 4 games missing one or both sportsbooks). No
 > backend, schema, or styling-framework changes. See `CURRENT_STATUS.md`
 > for the full verification output.
+
+> **`starting_pitchers` and `team_records` now populated (2026-06-15).**
+> Both MLB Stats API fetchers already returned this data — no new API
+> calls or fields needed. Added `save_starting_pitchers()` and
+> `save_team_records()` to `save_live_data.py`, following the existing
+> UPSERT pattern. Verified live: 10/10 games saved a starting-pitchers row
+> (10/10 with at least one probable pitcher; 2 games still have one side
+> as `TBD`/`null`), and all 30 teams have a 2026 team_records row with
+> full win/loss + home/away splits. No schema changes, no frontend
+> changes. As a side effect, `/games/today`'s
+> `probable_home_pitcher`/`probable_away_pitcher` fields now return real
+> data instead of always `null`. See `CURRENT_STATUS.md` for example rows.
 
 - [x] Set up Next.js project
 - [x] Today's games page
