@@ -91,6 +91,17 @@ Focus areas: moneylines, player props, batter vs pitcher matchups, line movement
 > browser can call the API) and `game_time` added to the `/games/today`
 > response (see `CURRENT_STATUS.md` for details).
 
+> **Game date normalization fix complete (2026-06-15).** Root cause
+> identified: `game_date` was derived from the MLB Stats API's UTC
+> `gameDate` field instead of the schedule date (`dates[].date`), which
+> split a single day's slate across two dates. Fixed in
+> `backend/fetchers/mlb_stats_api.py` (`game_date` now uses the MLB
+> schedule date) and `backend/scripts/save_live_data.py` (the UPSERT now
+> refreshes `game_date`/`game_time` on conflict, and odds matching now
+> handles the UTC rollover). Verified: `GET /games/today` returns all 10
+> games for the tested slate, and the dashboard displays all 10 games.
+> See `CURRENT_STATUS.md` for full details.
+
 - [x] Set up Next.js project
 - [x] Today's games page
 - [ ] Team matchup page
