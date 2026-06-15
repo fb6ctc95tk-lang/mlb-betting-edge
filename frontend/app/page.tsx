@@ -3,17 +3,23 @@
 import { useEffect, useState } from "react";
 import type { CSSProperties } from "react";
 
+type Odds = {
+  sportsbook: string;
+  away_moneyline: number;
+  away_implied_probability: number;
+  home_moneyline: number;
+  home_implied_probability: number;
+  recorded_at: string;
+};
+
 type Game = {
   game_id: number;
   game_date: string;
   game_time: string | null;
-  home_team: string;
   away_team: string;
+  home_team: string;
   status: string;
-  home_score: number | null;
-  away_score: number | null;
-  probable_home_pitcher: string | null;
-  probable_away_pitcher: string | null;
+  odds: Odds[];
 };
 
 const cellStyle: CSSProperties = {
@@ -22,6 +28,18 @@ const cellStyle: CSSProperties = {
   textAlign: "left",
 };
 
+function findOdds(game: Game, sportsbook: string): Odds | undefined {
+  return game.odds.find((o) => o.sportsbook === sportsbook);
+}
+
+function formatMoneyline(value: number): string {
+  return value > 0 ? `+${value}` : `${value}`;
+}
+
+function formatProbability(value: number): string {
+  return `${value.toFixed(2)}%`;
+}
+
 export default function Home() {
   const [games, setGames] = useState<Game[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -29,7 +47,7 @@ export default function Home() {
   useEffect(() => {
     const apiUrl = process.env.NEXT_PUBLIC_API_URL;
 
-    fetch(`${apiUrl}/games/today`)
+    fetch(`${apiUrl}/games/today-with-odds`)
       .then((res) => {
         if (!res.ok) {
           throw new Error(`Request failed with status ${res.status}`);
@@ -63,19 +81,48 @@ export default function Home() {
               <th style={cellStyle}>Home Team</th>
               <th style={cellStyle}>Game Time</th>
               <th style={cellStyle}>Status</th>
+              <th style={cellStyle}>Bet365 Moneyline (Away / Home)</th>
+              <th style={cellStyle}>Bet365 Implied Prob (Away / Home)</th>
+              <th style={cellStyle}>DraftKings Moneyline (Away / Home)</th>
+              <th style={cellStyle}>DraftKings Implied Prob (Away / Home)</th>
             </tr>
           </thead>
           <tbody>
-            {games.map((game) => (
-              <tr key={game.game_id}>
-                <td style={cellStyle}>{game.away_team}</td>
-                <td style={cellStyle}>{game.home_team}</td>
-                <td style={cellStyle}>
-                  {game.game_time ? `${game.game_time} UTC` : "TBD"}
-                </td>
-                <td style={cellStyle}>{game.status.replace("_", " ")}</td>
-              </tr>
-            ))}
+            {games.map((game) => {
+              const bet365 = findOdds(game, "Bet365");
+              const draftKings = findOdds(game, "DraftKings");
+
+              return (
+                <tr key={game.game_id}>
+                  <td style={cellStyle}>{game.away_team}</td>
+                  <td style={cellStyle}>{game.home_team}</td>
+                  <td style={cellStyle}>
+                    {game.game_time ? `${game.game_time} UTC` : "TBD"}
+                  </td>
+                  <td style={cellStyle}>{game.status.replace("_", " ")}</td>
+                  <td style={cellStyle}>
+                    {bet365
+                      ? `${formatMoneyline(bet365.away_moneyline)} / ${formatMoneyline(bet365.home_moneyline)}`
+                      : "-"}
+                  </td>
+                  <td style={cellStyle}>
+                    {bet365
+                      ? `${formatProbability(bet365.away_implied_probability)} / ${formatProbability(bet365.home_implied_probability)}`
+                      : "-"}
+                  </td>
+                  <td style={cellStyle}>
+                    {draftKings
+                      ? `${formatMoneyline(draftKings.away_moneyline)} / ${formatMoneyline(draftKings.home_moneyline)}`
+                      : "-"}
+                  </td>
+                  <td style={cellStyle}>
+                    {draftKings
+                      ? `${formatProbability(draftKings.away_implied_probability)} / ${formatProbability(draftKings.home_implied_probability)}`
+                      : "-"}
+                  </td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       )}

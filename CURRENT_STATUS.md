@@ -52,8 +52,12 @@ it explains exactly what's working, what's been tested, and what to do next.
   authentication, no cloud deployment — this is a local, read-only API.
 - **Next.js dashboard (frontend/)** — a Next.js 16 app (TypeScript, App
   Router, ESLint, no Tailwind) with one page: the homepage. It fetches
-  `GET /games/today` and shows a table of today's games (Away Team, Home
-  Team, Game Time, Status), with loading, error, and empty states.
+  `GET /games/today-with-odds` and shows a table of today's games (Away
+  Team, Home Team, Game Time, Status), plus Bet365 and DraftKings
+  Moneyline and Implied Probability columns (each shown as "Away / Home"),
+  with loading, error, and empty states. Games without odds for a
+  sportsbook show "-" in that sportsbook's columns instead of being
+  hidden.
 
 ---
 
@@ -244,6 +248,40 @@ The FastAPI backend is fully working and read-only.
     ```
   - No frontend changes.
 
+- ✅ **Dashboard now shows odds and implied probability (2026-06-15).**
+  `frontend/app/page.tsx` now fetches `GET /games/today-with-odds` instead
+  of `GET /games/today`. The table keeps the existing Away Team, Home
+  Team, Game Time, Status columns and adds four more: Bet365 Moneyline,
+  Bet365 Implied Prob, DraftKings Moneyline, DraftKings Implied Prob. Each
+  odds cell shows `"Away / Home"` (e.g. `+175 / -213` or `36.36% / 68.05%`).
+  If a sportsbook has no odds for a game, both of its columns show `"-"`
+  and the game row still renders.
+  - No backend, schema, or styling-framework changes — same plain
+    `<table>` with the existing `cellStyle`, no Tailwind.
+  - Verified: `npx tsc --noEmit` passes with no type errors; homepage
+    returns HTTP 200 with no error overlay.
+  - Verified all **10 games** render with correct values by replaying the
+    page's exact formatting logic (`findOdds`, `formatMoneyline`,
+    `formatProbability`) against the live `/games/today-with-odds`
+    response — output matched the API for all 10 rows, including the 4
+    games with one or both sportsbooks missing (shown as `"-"`):
+
+    ```
+     MIA @ PHI  | 22:40 | scheduled  | Bet365 +175 / -213  36.36% / 68.05% | DK +177 / -217  36.10% / 68.45%
+      KC @ WSH  | 22:45 | scheduled  | Bet365 -            -               | DK -            -
+     NYM @ CIN  | 23:10 | scheduled  | Bet365 +115 / -135  46.51% / 57.45% | DK +114 / -139  46.73% / 58.16%
+      SD @ STL  | 23:45 | scheduled  | Bet365 -            -               | DK -            -
+     COL @ CHC  | 00:05 | scheduled  | Bet365 +165 / -200  37.74% / 66.67% | DK +169 / -208  37.17% / 67.53%
+     MIN @ TEX  | 00:05 | scheduled  | Bet365 +140 / -167  41.67% / 62.55% | DK -            -
+     DET @ HOU  | 00:10 | scheduled  | Bet365 +110 / -132  47.62% / 56.90% | DK +109 / -133  47.85% / 57.08%
+     LAA @ AZ   | 01:40 | scheduled  | Bet365 +110 / -132  47.62% / 56.90% | DK +108 / -132  48.08% / 56.90%
+     PIT @ ATH  | 01:40 | scheduled  | Bet365 +110 / -132  47.62% / 56.90% | DK +108 / -132  48.08% / 56.90%
+      TB @ LAD  | 02:10 | scheduled  | Bet365 -            -               | DK -            -
+    ```
+  - No headless browser was available in this environment to capture a
+    visual screenshot — verification was done via the checks above
+    instead.
+
 ---
 
 ## 3. Files That Were Created
@@ -301,7 +339,8 @@ mlb-betting-edge/
     │                              Next.js 16 conventions for AI coding assistants
     └── app/
         ├── layout.tsx             Root layout — page title "MLB Betting Edge"
-        ├── page.tsx               Homepage — fetches /games/today, shows games table
+        ├── page.tsx               Homepage — fetches /games/today-with-odds,
+        │                          shows games + Bet365/DraftKings odds table
         └── globals.css            Global styles (plain CSS, no Tailwind)
 ```
 
@@ -593,21 +632,22 @@ npm run dev
 **What you should see:** `Local: http://localhost:3000`
 
 Open http://localhost:3000 in a browser. The FastAPI backend (above) must
-also be running, since the homepage fetches `/games/today` from it.
+also be running, since the homepage fetches `/games/today-with-odds` from
+it.
 
 ---
 
 ## 8. Next Recommended Step
 
-**Dashboard MVP homepage is done and verified.** Possible next steps
-(pick one, per `CLAUDE.md` — one feature at a time):
+**Dashboard now shows games, moneylines, and implied probabilities.**
+Possible next steps (pick one, per `CLAUDE.md` — one feature at a time):
 
 - Show real game times in a friendlier format (e.g. local time instead of
   raw UTC "HH:MM").
-- Add `/odds/today` data to the dashboard (e.g. a moneyline column) — the
-  endpoint exists and is tested, just not wired into the frontend yet.
 - Build a second page (matchups, line movement, etc.) per
   `PROJECT_PLAN.md` Phase 3.
+- Populate `starting_pitchers` / `team_records` via ingestion so those
+  fields stop being `null`.
 
 ---
 

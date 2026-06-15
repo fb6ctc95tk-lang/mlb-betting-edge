@@ -133,8 +133,19 @@ Focus areas: moneylines, player props, batter vs pitcher matchups, line movement
 > changes, no frontend changes. See `CURRENT_STATUS.md` for the example
 > response.
 
+> **Dashboard now shows odds and implied probability (2026-06-15).**
+> `frontend/app/page.tsx` now fetches `GET /games/today-with-odds` and adds
+> Bet365 and DraftKings Moneyline + Implied Probability columns (shown as
+> "Away / Home") to the existing games table. Missing sportsbook odds show
+> `"-"` without hiding the game. Verified: `tsc --noEmit` passes, homepage
+> returns HTTP 200, and all 10 games render with values matching the live
+> API response (including the 4 games missing one or both sportsbooks). No
+> backend, schema, or styling-framework changes. See `CURRENT_STATUS.md`
+> for the full verification output.
+
 - [x] Set up Next.js project
 - [x] Today's games page
+- [x] Display moneyline odds + implied probability on today's games page
 - [ ] Team matchup page
 - [ ] Player props page
 - [ ] Batter vs Pitcher analysis page
