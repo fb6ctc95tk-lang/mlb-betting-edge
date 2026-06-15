@@ -155,6 +155,18 @@ Focus areas: moneylines, player props, batter vs pitcher matchups, line movement
 > `probable_home_pitcher`/`probable_away_pitcher` fields now return real
 > data instead of always `null`. See `CURRENT_STATUS.md` for example rows.
 
+> **`/games/today-with-odds` now includes pitchers and records
+> (2026-06-15).** Extended the existing query in
+> `backend/routers/games.py`: a `LEFT JOIN starting_pitchers` adds
+> `away_pitcher`/`home_pitcher` (`null` if not announced), and a
+> `DISTINCT ON (team_id) ... ORDER BY season DESC` query against
+> `team_records` adds `away_record`/`home_record` formatted as
+> `"wins-losses"`. Verified live: 10 games returned, 0 mismatches vs. a
+> direct PostgreSQL query, both teams have a record for all 10 games, 2
+> games have a `null` away_pitcher (not yet announced), and the `odds`
+> array is unchanged (14 rows across 7 games). No schema, ingestion, or
+> frontend changes. See `CURRENT_STATUS.md` for the example response.
+
 - [x] Set up Next.js project
 - [x] Today's games page
 - [x] Display moneyline odds + implied probability on today's games page

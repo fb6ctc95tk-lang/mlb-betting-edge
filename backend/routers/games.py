@@ -84,10 +84,15 @@ def get_todays_games_with_odds():
                 g.game_time,
                 at.abbreviation AS away_team,
                 ht.abbreviation AS home_team,
-                g.status
+                g.status,
+                sp.away_pitcher,
+                sp.home_pitcher,
+                g.away_team_id,
+                g.home_team_id
             FROM games g
             JOIN teams ht ON ht.id = g.home_team_id
             JOIN teams at ON at.id = g.away_team_id
+            LEFT JOIN starting_pitchers sp ON sp.game_id = g.id
             WHERE g.game_date = %s
             ORDER BY g.id
             """,
@@ -115,6 +120,18 @@ def get_todays_games_with_odds():
             (today,),
         )
         odds_rows = cur.fetchall()
+
+        cur.execute(
+            """
+            SELECT DISTINCT ON (team_id)
+                team_id,
+                wins,
+                losses
+            FROM team_records
+            ORDER BY team_id, season DESC
+            """
+        )
+        record_rows = cur.fetchall()
         cur.close()
     except Exception as e:
         conn.close()
@@ -133,14 +150,26 @@ def get_todays_games_with_odds():
             "recorded_at": recorded_at,
         })
 
+    record_by_team_id = {
+        team_id: f"{wins}-{losses}"
+        for team_id, wins, losses in record_rows
+    }
+
     games = []
-    for game_id, game_date, game_time, away_team, home_team, status in game_rows:
+    for (
+        game_id, game_date, game_time, away_team, home_team, status,
+        away_pitcher, home_pitcher, away_team_id, home_team_id,
+    ) in game_rows:
         games.append({
             "game_id": game_id,
             "game_date": game_date,
             "game_time": game_time,
             "away_team": away_team,
             "home_team": home_team,
+            "away_pitcher": away_pitcher,
+            "home_pitcher": home_pitcher,
+            "away_record": record_by_team_id.get(away_team_id),
+            "home_record": record_by_team_id.get(home_team_id),
             "status": status,
             "odds": odds_by_game.get(game_id, []),
         })

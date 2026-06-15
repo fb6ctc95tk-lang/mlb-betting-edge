@@ -44,9 +44,11 @@ it explains exactly what's working, what's been tested, and what to do next.
     row per game/sportsbook (game_id, game_date, game_time, sportsbook,
     away_team, home_team, away_moneyline, home_moneyline, recorded_at)
   - `GET /games/today-with-odds` — today's games (game_id, game_date,
-    game_time, away_team, home_team, status), each with an `odds` array
-    of the latest moneyline per sportsbook (empty array if no odds yet),
-    including each side's implied probability percentage
+    game_time, away_team, home_team, away_pitcher, home_pitcher,
+    away_record, home_record, status), each with an `odds` array of the
+    latest moneyline per sportsbook (empty array if no odds yet),
+    including each side's implied probability percentage. Pitchers are
+    `null` if not yet announced; records are formatted `"wins-losses"`.
   - `GET /teams` — all 30 teams
   CORS is enabled for `http://localhost:3000` (GET only) so the Next.js
   dashboard can call it from the browser. No write endpoints, no
@@ -323,6 +325,61 @@ The FastAPI backend is fully working and read-only.
     always `null`, now return real pitcher names — the query already
     joined `starting_pitchers`, it was just empty before.
   - No frontend changes, no new endpoints, no edge calculations.
+
+- ✅ **`/games/today-with-odds` now includes pitchers and records
+  (2026-06-15).** `backend/routers/games.py` extended the existing
+  query — no new endpoints, tables, or fetchers:
+  - `LEFT JOIN starting_pitchers` adds `away_pitcher` / `home_pitcher`
+    (`null` if not yet announced).
+  - A new `SELECT DISTINCT ON (team_id) ... ORDER BY team_id, season DESC`
+    query against `team_records` gives each team's latest win/loss
+    record, formatted as `"wins-losses"` (e.g. `"36-36"`), added as
+    `away_record` / `home_record`.
+  - The `odds` array's shape and contents are unchanged.
+
+  **Verified live (2026-06-15):**
+  - **10 games** returned (game_ids 16–25).
+  - 0 mismatches against a direct PostgreSQL query joining
+    `starting_pitchers` and `team_records` for the same fields.
+  - Both teams have a `*_record` value for all 10 games.
+  - `away_pitcher` is `null` for 2 games (SD@STL, MIN@TEX — MLB hasn't
+    announced those starters yet); all other pitcher fields populated.
+  - Odds output unchanged: 14 odds rows across 7 games, implied
+    probabilities still correct (e.g. Bet365 away `+180` → `35.71%`).
+  - Example response (one game with full odds):
+    ```json
+    {
+      "game_id": 16,
+      "game_date": "2026-06-15",
+      "game_time": "22:40",
+      "away_team": "MIA",
+      "home_team": "PHI",
+      "away_pitcher": "Ryan Gusto",
+      "home_pitcher": "Zack Wheeler",
+      "away_record": "36-36",
+      "home_record": "38-33",
+      "status": "scheduled",
+      "odds": [
+        {
+          "sportsbook": "Bet365",
+          "away_moneyline": 180,
+          "away_implied_probability": 35.71,
+          "home_moneyline": -222,
+          "home_implied_probability": 68.94,
+          "recorded_at": "2026-06-15T03:41:04-04:00"
+        },
+        {
+          "sportsbook": "DraftKings",
+          "away_moneyline": 177,
+          "away_implied_probability": 36.1,
+          "home_moneyline": -217,
+          "home_implied_probability": 68.45,
+          "recorded_at": "2026-06-15T03:41:04-04:00"
+        }
+      ]
+    }
+    ```
+  - No frontend changes, no schema changes, no ingestion changes.
 
 ---
 
