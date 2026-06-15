@@ -62,3 +62,84 @@ def get_todays_games():
         })
 
     return games
+
+
+@router.get("/today-with-odds")
+def get_todays_games_with_odds():
+    try:
+        conn = get_db_connection()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Database connection failed: {e}")
+
+    today = datetime.now(timezone.utc).date()
+
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT
+                g.id,
+                g.game_date,
+                g.game_time,
+                at.abbreviation AS away_team,
+                ht.abbreviation AS home_team,
+                g.status
+            FROM games g
+            JOIN teams ht ON ht.id = g.home_team_id
+            JOIN teams at ON at.id = g.away_team_id
+            WHERE g.game_date = %s
+            ORDER BY g.id
+            """,
+            (today,),
+        )
+        game_rows = cur.fetchall()
+
+        cur.execute(
+            """
+            SELECT
+                o.game_id,
+                o.sportsbook,
+                o.away_moneyline,
+                o.home_moneyline,
+                o.recorded_at
+            FROM (
+                SELECT DISTINCT ON (game_id, sportsbook) *
+                FROM odds_history
+                ORDER BY game_id, sportsbook, recorded_at DESC
+            ) o
+            JOIN games g ON g.id = o.game_id
+            WHERE g.game_date = %s
+            ORDER BY o.game_id, o.sportsbook
+            """,
+            (today,),
+        )
+        odds_rows = cur.fetchall()
+        cur.close()
+    except Exception as e:
+        conn.close()
+        raise HTTPException(status_code=500, detail=f"Database query failed: {e}")
+
+    conn.close()
+
+    odds_by_game = {}
+    for game_id, sportsbook, away_ml, home_ml, recorded_at in odds_rows:
+        odds_by_game.setdefault(game_id, []).append({
+            "sportsbook": sportsbook,
+            "away_moneyline": away_ml,
+            "home_moneyline": home_ml,
+            "recorded_at": recorded_at,
+        })
+
+    games = []
+    for game_id, game_date, game_time, away_team, home_team, status in game_rows:
+        games.append({
+            "game_id": game_id,
+            "game_date": game_date,
+            "game_time": game_time,
+            "away_team": away_team,
+            "home_team": home_team,
+            "status": status,
+            "odds": odds_by_game.get(game_id, []),
+        })
+
+    return games

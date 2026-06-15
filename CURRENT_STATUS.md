@@ -42,6 +42,9 @@ it explains exactly what's working, what's been tested, and what to do next.
   - `GET /odds/today` — latest moneyline odds for today's games only, one
     row per game/sportsbook (game_id, game_date, game_time, sportsbook,
     away_team, home_team, away_moneyline, home_moneyline, recorded_at)
+  - `GET /games/today-with-odds` — today's games (game_id, game_date,
+    game_time, away_team, home_team, status), each with an `odds` array
+    of the latest moneyline per sportsbook (empty array if no odds yet)
   - `GET /teams` — all 30 teams
   CORS is enabled for `http://localhost:3000` (GET only) so the Next.js
   dashboard can call it from the browser. No write endpoints, no
@@ -159,6 +162,54 @@ The FastAPI backend is fully working and read-only.
   - No frontend changes — this is backend-only, not wired into the
     dashboard yet.
 
+- ✅ **`GET /games/today-with-odds` added and tested live (2026-06-15).**
+  Combines `/games/today` and `/odds/today`'s query patterns into one
+  endpoint: today's games, each with an `odds` array of the latest
+  moneyline per sportsbook (same `DISTINCT ON (game_id, sportsbook)
+  ... ORDER BY recorded_at DESC` logic). Read-only, no new tables or
+  columns.
+  - Returned **10 games** (matches `/games/today`), with **13 odds rows**
+    total spread across **7 games** (3 games have `"odds": []`) — matches
+    a direct PostgreSQL query of the same data.
+  - No duplicate sportsbook entries within any game's `odds` array.
+  - Example response (one game with odds, one without):
+    ```json
+    [
+      {
+        "game_id": 16,
+        "game_date": "2026-06-15",
+        "game_time": "22:40",
+        "away_team": "MIA",
+        "home_team": "PHI",
+        "status": "scheduled",
+        "odds": [
+          {
+            "sportsbook": "Bet365",
+            "away_moneyline": 175,
+            "home_moneyline": -213,
+            "recorded_at": "2026-06-15T02:39:20-04:00"
+          },
+          {
+            "sportsbook": "DraftKings",
+            "away_moneyline": 177,
+            "home_moneyline": -217,
+            "recorded_at": "2026-06-15T02:39:20-04:00"
+          }
+        ]
+      },
+      {
+        "game_id": 17,
+        "game_date": "2026-06-15",
+        "game_time": "22:45",
+        "away_team": "KC",
+        "home_team": "WSH",
+        "status": "scheduled",
+        "odds": []
+      }
+    ]
+    ```
+  - No frontend changes — backend-only, not wired into the dashboard yet.
+
 ---
 
 ## 3. Files That Were Created
@@ -191,7 +242,7 @@ mlb-betting-edge/
 │   │   └── sportsdataio.py        PAUSED — kept ready, not used right now
 │   ├── routers/
 │   │   ├── __init__.py            Makes "routers" a Python package
-│   │   ├── games.py               GET /games/today
+│   │   ├── games.py               GET /games/today, GET /games/today-with-odds
 │   │   ├── odds.py                GET /odds/latest, GET /odds/today
 │   │   └── teams.py               GET /teams
 │   └── scripts/

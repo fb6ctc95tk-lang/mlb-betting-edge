@@ -34,6 +34,7 @@ Focus areas: moneylines, player props, batter vs pitcher matchups, line movement
         - [x] GET /games/today
         - [x] GET /odds/latest
         - [x] GET /odds/today
+        - [x] GET /games/today-with-odds
         - [x] GET /teams
 - [x] Step 6: Build Next.js page — today's games table (reads from FastAPI endpoints)
 - [ ] Step 7: Add line movement view (odds history chart per game)
@@ -108,6 +109,16 @@ Focus areas: moneylines, player props, batter vs pitcher matchups, line movement
 > game/sportsbook (game_id, game_date, game_time, sportsbook, away_team,
 > home_team, away_moneyline, home_moneyline, recorded_at). Tested live:
 > 13 rows across 7 of today's 10 games (7 Bet365 + 6 DraftKings). No
+> schema changes, no frontend changes yet. See `CURRENT_STATUS.md` for
+> the example response.
+
+> **`GET /games/today-with-odds` added (2026-06-15).** Combines
+> `/games/today` and `/odds/today` into one read-only endpoint: today's
+> games (game_id, game_date, game_time, away_team, home_team, status),
+> each with an `odds` array of the latest moneyline per sportsbook
+> (`"odds": []` if none yet). Tested live: 10 games returned, 13 odds
+> rows across 7 games, 3 games with `"odds": []`, no duplicate
+> sportsbook entries per game. Matches a direct PostgreSQL query. No
 > schema changes, no frontend changes yet. See `CURRENT_STATUS.md` for
 > the example response.
 
