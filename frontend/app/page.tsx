@@ -18,6 +18,10 @@ type Game = {
   game_time: string | null;
   away_team: string;
   home_team: string;
+  away_pitcher: string | null;
+  home_pitcher: string | null;
+  away_record: string | null;
+  home_record: string | null;
   status: string;
   odds: Odds[];
 };
@@ -81,6 +85,10 @@ export default function Home() {
               <th style={cellStyle}>Home Team</th>
               <th style={cellStyle}>Game Time</th>
               <th style={cellStyle}>Status</th>
+              <th style={cellStyle}>Away Pitcher</th>
+              <th style={cellStyle}>Home Pitcher</th>
+              <th style={cellStyle}>Away Record</th>
+              <th style={cellStyle}>Home Record</th>
               <th style={cellStyle}>Bet365 Moneyline (Away / Home)</th>
               <th style={cellStyle}>Bet365 Implied Prob (Away / Home)</th>
               <th style={cellStyle}>DraftKings Moneyline (Away / Home)</th>
@@ -100,6 +108,10 @@ export default function Home() {
                     {game.game_time ? `${game.game_time} UTC` : "TBD"}
                   </td>
                   <td style={cellStyle}>{game.status.replace("_", " ")}</td>
+                  <td style={cellStyle}>{game.away_pitcher ?? "-"}</td>
+                  <td style={cellStyle}>{game.home_pitcher ?? "-"}</td>
+                  <td style={cellStyle}>{game.away_record ?? "-"}</td>
+                  <td style={cellStyle}>{game.home_record ?? "-"}</td>
                   <td style={cellStyle}>
                     {bet365
                       ? `${formatMoneyline(bet365.away_moneyline)} / ${formatMoneyline(bet365.home_moneyline)}`

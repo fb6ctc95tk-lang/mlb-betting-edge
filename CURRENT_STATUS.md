@@ -56,11 +56,12 @@ it explains exactly what's working, what's been tested, and what to do next.
 - **Next.js dashboard (frontend/)** — a Next.js 16 app (TypeScript, App
   Router, ESLint, no Tailwind) with one page: the homepage. It fetches
   `GET /games/today-with-odds` and shows a table of today's games (Away
-  Team, Home Team, Game Time, Status), plus Bet365 and DraftKings
-  Moneyline and Implied Probability columns (each shown as "Away / Home"),
-  with loading, error, and empty states. Games without odds for a
-  sportsbook show "-" in that sportsbook's columns instead of being
-  hidden.
+  Team, Home Team, Game Time, Status, Away Pitcher, Home Pitcher, Away
+  Record, Home Record), plus Bet365 and DraftKings Moneyline and Implied
+  Probability columns (each shown as "Away / Home"), with loading, error,
+  and empty states. Games without odds for a sportsbook show "-" in that
+  sportsbook's columns, and a `null` pitcher also shows "-", without
+  hiding the game.
 
 ---
 
@@ -381,6 +382,24 @@ The FastAPI backend is fully working and read-only.
     ```
   - No frontend changes, no schema changes, no ingestion changes.
 
+- ✅ **Dashboard now shows pitchers and records (2026-06-15).**
+  `frontend/app/page.tsx` adds four columns to the existing table — Away
+  Pitcher, Home Pitcher, Away Record, Home Record — placed right after the
+  Status column and before the odds columns. Each value comes straight
+  from the `/games/today-with-odds` response; a `null` pitcher renders as
+  `"-"`. Same layout, no Tailwind, no charts.
+  - Verified: `npx tsc --noEmit` passes with no type errors.
+  - Verified live with a headless Chrome render of `http://localhost:3000`
+    (with the FastAPI backend running): the table rendered **11 `<tr>`
+    elements** (1 header + 10 games). Parsed every row and compared the
+    Away Team, Home Team, Away Pitcher, Home Pitcher, Away Record, and
+    Home Record cells against the live `/games/today-with-odds` response
+    — **0 mismatches** across all 10 games.
+  - Confirmed the `null` → `"-"` fallback: games 19 (SD@STL) and 21
+    (MIN@TEX) have `away_pitcher: null` in the API response, and both
+    rendered `"-"` in the Away Pitcher cell.
+  - No backend, schema, or ingestion changes.
+
 ---
 
 ## 3. Files That Were Created
@@ -439,7 +458,8 @@ mlb-betting-edge/
     └── app/
         ├── layout.tsx             Root layout — page title "MLB Betting Edge"
         ├── page.tsx               Homepage — fetches /games/today-with-odds,
-        │                          shows games + Bet365/DraftKings odds table
+        │                          shows games + pitchers + records +
+        │                          Bet365/DraftKings odds table
         └── globals.css            Global styles (plain CSS, no Tailwind)
 ```
 
@@ -734,15 +754,17 @@ it.
 
 ## 8. Next Recommended Step
 
-**Dashboard now shows games, moneylines, and implied probabilities.**
+**Dashboard now shows games, moneylines, implied probabilities, probable
+pitchers, and team records.**
 Possible next steps (pick one, per `CLAUDE.md` — one feature at a time):
 
 - Show real game times in a friendlier format (e.g. local time instead of
   raw UTC "HH:MM").
 - Build a second page (matchups, line movement, etc.) per
   `PROJECT_PLAN.md` Phase 3.
-- Populate `starting_pitchers` / `team_records` via ingestion so those
-  fields stop being `null`.
+- Build the line movement view (Step 7 in `PROJECT_PLAN.md`), since
+  `odds_history` already accumulates a new snapshot each time
+  `save_live_data.py` runs.
 
 ---
 

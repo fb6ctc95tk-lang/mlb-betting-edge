@@ -167,9 +167,20 @@ Focus areas: moneylines, player props, batter vs pitcher matchups, line movement
 > array is unchanged (14 rows across 7 games). No schema, ingestion, or
 > frontend changes. See `CURRENT_STATUS.md` for the example response.
 
+> **Dashboard now shows pitchers and records (2026-06-15).**
+> `frontend/app/page.tsx` adds four columns — Away Pitcher, Home Pitcher,
+> Away Record, Home Record — between Status and the odds columns, using
+> the existing `/games/today-with-odds` response. Same table layout, no
+> Tailwind, no charts. A `null` pitcher renders as `"-"`. Verified live
+> with a headless Chrome render: all 10 games rendered with 0 mismatches
+> vs. the API response, including both `null` away-pitcher games showing
+> `"-"`. No backend, schema, or ingestion changes. See `CURRENT_STATUS.md`
+> for details.
+
 - [x] Set up Next.js project
 - [x] Today's games page
 - [x] Display moneyline odds + implied probability on today's games page
+- [x] Display probable pitchers and team records on today's games page
 - [ ] Team matchup page
 - [ ] Player props page
 - [ ] Batter vs Pitcher analysis page
