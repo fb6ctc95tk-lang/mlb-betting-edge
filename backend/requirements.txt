@@ -1,0 +1,17 @@
+# MLB Betting Edge — Python dependencies
+# Install with: pip install -r requirements.txt
+
+# Makes HTTP requests to the SportsDataIO API
+requests==2.32.3
+
+# Loads variables from the .env file into Python
+python-dotenv==1.0.1
+
+# Connects Python to PostgreSQL
+psycopg2-binary==2.9.12
+
+# Web framework for the read-only API
+fastapi==0.115.6
+
+# Runs the FastAPI app (the [standard] extra enables --reload)
+uvicorn[standard]==0.34.0

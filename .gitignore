@@ -1,0 +1,36 @@
+# =============================================================
+# MLB Betting Edge — Git Ignore Rules
+# Files listed here are NEVER uploaded to GitHub
+# =============================================================
+
+# ----- SECRET FILES -----
+# Never, ever commit these
+.env
+backend/.env
+frontend/.env.local
+
+# ----- PYTHON -----
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+.pytest_cache/
+
+# ----- NODE / NEXT.JS -----
+node_modules/
+.next/
+out/
+npm-debug.log*
+
+# ----- OS FILES -----
+.DS_Store
+Thumbs.db
+
+# ----- EDITOR FILES -----
+.vscode/
+.idea/
+*.swp
