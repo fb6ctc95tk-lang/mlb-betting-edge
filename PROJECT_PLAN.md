@@ -122,6 +122,17 @@ Focus areas: moneylines, player props, batter vs pitcher matchups, line movement
 > schema changes, no frontend changes yet. See `CURRENT_STATUS.md` for
 > the example response.
 
+> **Implied probability added (2026-06-15).** New utility
+> `backend/odds_math.py` (`american_odds_to_implied_probability()`)
+> converts an American moneyline to a percentage, rounded to 2 decimals.
+> `/games/today-with-odds` now returns `away_implied_probability` and
+> `home_implied_probability` alongside each moneyline. Verified against
+> known examples (`-110` → `52.38`, `-120` → `54.55`, `+100` → `50.00`,
+> `+150` → `40.00`) and live against all 13 odds rows across 10 games —
+> 0 mismatches. Read-only — no edge calculations, no picks, no schema
+> changes, no frontend changes. See `CURRENT_STATUS.md` for the example
+> response.
+
 - [x] Set up Next.js project
 - [x] Today's games page
 - [ ] Team matchup page

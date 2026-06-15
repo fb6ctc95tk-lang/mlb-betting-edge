@@ -44,7 +44,8 @@ it explains exactly what's working, what's been tested, and what to do next.
     away_team, home_team, away_moneyline, home_moneyline, recorded_at)
   - `GET /games/today-with-odds` — today's games (game_id, game_date,
     game_time, away_team, home_team, status), each with an `odds` array
-    of the latest moneyline per sportsbook (empty array if no odds yet)
+    of the latest moneyline per sportsbook (empty array if no odds yet),
+    including each side's implied probability percentage
   - `GET /teams` — all 30 teams
   CORS is enabled for `http://localhost:3000` (GET only) so the Next.js
   dashboard can call it from the browser. No write endpoints, no
@@ -186,13 +187,17 @@ The FastAPI backend is fully working and read-only.
           {
             "sportsbook": "Bet365",
             "away_moneyline": 175,
+            "away_implied_probability": 36.36,
             "home_moneyline": -213,
+            "home_implied_probability": 68.05,
             "recorded_at": "2026-06-15T02:39:20-04:00"
           },
           {
             "sportsbook": "DraftKings",
             "away_moneyline": 177,
+            "away_implied_probability": 36.1,
             "home_moneyline": -217,
+            "home_implied_probability": 68.45,
             "recorded_at": "2026-06-15T02:39:20-04:00"
           }
         ]
@@ -209,6 +214,35 @@ The FastAPI backend is fully working and read-only.
     ]
     ```
   - No frontend changes — backend-only, not wired into the dashboard yet.
+
+- ✅ **Implied probability added to `/games/today-with-odds` (2026-06-15).**
+  New small utility `backend/odds_math.py` —
+  `american_odds_to_implied_probability(odds)` converts an American
+  moneyline to an implied probability percentage, rounded to 2 decimals:
+  - Negative odds: `abs(odds) / (abs(odds) + 100) * 100`
+  - Positive odds: `100 / (odds + 100) * 100`
+
+  Each odds entry in `/games/today-with-odds` now includes
+  `away_implied_probability` and `home_implied_probability` alongside the
+  existing moneylines. Read-only — no edge calculations, no picks, no
+  schema changes.
+  - Verified against known examples: `-110` → `52.38`, `-120` → `54.55`,
+    `+100` → `50.00`, `+150` → `40.00` — all matched.
+  - Verified live: all **13 odds rows** across **10 games** from
+    `/games/today-with-odds` matched a manual recalculation of implied
+    probability from their moneylines (0 mismatches).
+  - Example odds entry:
+    ```json
+    {
+      "sportsbook": "Bet365",
+      "away_moneyline": 175,
+      "away_implied_probability": 36.36,
+      "home_moneyline": -213,
+      "home_implied_probability": 68.05,
+      "recorded_at": "2026-06-15T02:39:20-04:00"
+    }
+    ```
+  - No frontend changes.
 
 ---
 
@@ -232,6 +266,7 @@ mlb-betting-edge/
 │   ├── __init__.py                Makes "backend" importable for uvicorn
 │   ├── main.py                    FastAPI app — wires up routers + /health
 │   ├── db.py                      get_db_connection() using psycopg2 + DATABASE_URL
+│   ├── odds_math.py               american_odds_to_implied_probability()
 │   ├── test_mlb_stats_api.py      Test script — prints live MLB games/standings
 │   ├── test_odds_api.py           Test script — raw OddsAPI.io connection check
 │   ├── test_odds_fetcher.py       Test script — prints standardized odds data

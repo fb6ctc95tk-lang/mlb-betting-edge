@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, HTTPException
 
 from ..db import get_db_connection
+from ..odds_math import american_odds_to_implied_probability
 
 router = APIRouter()
 
@@ -126,7 +127,9 @@ def get_todays_games_with_odds():
         odds_by_game.setdefault(game_id, []).append({
             "sportsbook": sportsbook,
             "away_moneyline": away_ml,
+            "away_implied_probability": american_odds_to_implied_probability(away_ml),
             "home_moneyline": home_ml,
+            "home_implied_probability": american_odds_to_implied_probability(home_ml),
             "recorded_at": recorded_at,
         })
 
