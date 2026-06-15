@@ -39,6 +39,9 @@ it explains exactly what's working, what's been tested, and what to do next.
     (HH:MM, UTC).
   - `GET /odds/latest` — latest moneyline odds per game/team/sportsbook
     from `odds_history`
+  - `GET /odds/today` — latest moneyline odds for today's games only, one
+    row per game/sportsbook (game_id, game_date, game_time, sportsbook,
+    away_team, home_team, away_moneyline, home_moneyline, recorded_at)
   - `GET /teams` — all 30 teams
   CORS is enabled for `http://localhost:3000` (GET only) so the Next.js
   dashboard can call it from the browser. No write endpoints, no
@@ -129,6 +132,33 @@ The FastAPI backend is fully working and read-only.
     all **10** games for 2026-06-15, and the dashboard table shows all 10
     rows. See section 5 for details.
 
+- ✅ **`GET /odds/today` added and tested live (2026-06-15).** Returns the
+  latest saved moneyline odds for today's games only, one row per
+  game/sportsbook (using `DISTINCT ON (game_id, sportsbook) ... ORDER BY
+  recorded_at DESC`, same pattern as `/odds/latest`). Read-only, no new
+  tables or columns.
+  - Returned **13 rows** covering **7 of the 10** games for 2026-06-15
+    (the other 3 games don't have odds posted yet — normal, see section
+    5's OddsAPI.io note).
+  - Sportsbook breakdown: **7 Bet365** rows, **6 DraftKings** rows (one
+    game has only a Bet365 line so far).
+  - Example response row:
+    ```json
+    {
+      "game_id": 16,
+      "game_date": "2026-06-15",
+      "game_time": "22:40",
+      "sportsbook": "Bet365",
+      "away_team": "MIA",
+      "home_team": "PHI",
+      "away_moneyline": 175,
+      "home_moneyline": -213,
+      "recorded_at": "2026-06-15T02:39:20-04:00"
+    }
+    ```
+  - No frontend changes — this is backend-only, not wired into the
+    dashboard yet.
+
 ---
 
 ## 3. Files That Were Created
@@ -162,7 +192,7 @@ mlb-betting-edge/
 │   ├── routers/
 │   │   ├── __init__.py            Makes "routers" a Python package
 │   │   ├── games.py               GET /games/today
-│   │   ├── odds.py                GET /odds/latest
+│   │   ├── odds.py                GET /odds/latest, GET /odds/today
 │   │   └── teams.py               GET /teams
 │   └── scripts/
 │       ├── test_db_connection.py  Connects to PostgreSQL, runs SELECT NOW()
@@ -488,7 +518,8 @@ also be running, since the homepage fetches `/games/today` from it.
 
 - Show real game times in a friendlier format (e.g. local time instead of
   raw UTC "HH:MM").
-- Add `/odds/latest` data to the dashboard (e.g. a moneyline column).
+- Add `/odds/today` data to the dashboard (e.g. a moneyline column) — the
+  endpoint exists and is tested, just not wired into the frontend yet.
 - Build a second page (matchups, line movement, etc.) per
   `PROJECT_PLAN.md` Phase 3.
 

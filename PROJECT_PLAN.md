@@ -33,6 +33,7 @@ Focus areas: moneylines, player props, batter vs pitcher matchups, line movement
         - [x] GET /health
         - [x] GET /games/today
         - [x] GET /odds/latest
+        - [x] GET /odds/today
         - [x] GET /teams
 - [x] Step 6: Build Next.js page — today's games table (reads from FastAPI endpoints)
 - [ ] Step 7: Add line movement view (odds history chart per game)
@@ -101,6 +102,14 @@ Focus areas: moneylines, player props, batter vs pitcher matchups, line movement
 > handles the UTC rollover). Verified: `GET /games/today` returns all 10
 > games for the tested slate, and the dashboard displays all 10 games.
 > See `CURRENT_STATUS.md` for full details.
+
+> **`GET /odds/today` added (2026-06-15).** Read-only endpoint returning
+> the latest saved moneyline odds for today's games, one row per
+> game/sportsbook (game_id, game_date, game_time, sportsbook, away_team,
+> home_team, away_moneyline, home_moneyline, recorded_at). Tested live:
+> 13 rows across 7 of today's 10 games (7 Bet365 + 6 DraftKings). No
+> schema changes, no frontend changes yet. See `CURRENT_STATUS.md` for
+> the example response.
 
 - [x] Set up Next.js project
 - [x] Today's games page
