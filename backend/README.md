@@ -151,6 +151,42 @@ python test_mlb_stats_api.py
 
 ---
 
+## API Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/health` | Server health check |
+| GET | `/games/today` | Today's games (no odds) |
+| GET | `/games/today-with-odds` | Today's games with latest moneylines and team records |
+| GET | `/odds/latest` | Latest moneyline per game and sportsbook |
+| GET | `/odds/today` | Latest moneylines for today's games |
+| GET | `/odds/movement` | Opening vs latest moneyline, movement delta, per game/sportsbook/side |
+| GET | `/teams` | All teams |
+
+### `/odds/movement` — Line Movement v1
+
+Returns one entry per game × sportsbook × side (home/away).
+
+```json
+[
+  {
+    "game_id": 1,
+    "sportsbook": "Bet365",
+    "team": "NYY",
+    "side": "home",
+    "opening_moneyline": -140,
+    "latest_moneyline": -155,
+    "movement": -15,
+    "opening_timestamp": "2026-06-16T08:00:00Z",
+    "latest_timestamp": "2026-06-16T14:30:00Z"
+  }
+]
+```
+
+`movement = latest_moneyline - opening_moneyline`. Negative = line moved toward the favorite; positive = moved toward the underdog. Returns an empty list `[]` when there is only one snapshot per game (no movement yet to calculate).
+
+---
+
 ## OddsAPI.io (Active — Moneyline Odds)
 
 `fetchers/odds_api_io.py` fetches moneyline odds from two sportsbooks
