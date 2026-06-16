@@ -37,7 +37,7 @@ Focus areas: moneylines, player props, batter vs pitcher matchups, line movement
         - [x] GET /games/today-with-odds
         - [x] GET /teams
 - [x] Step 6: Build Next.js page — today's games table (reads from FastAPI endpoints)
-- [ ] Step 7: Add line movement view (odds history chart per game)
+- [x] Step 7: Add line movement view — table showing opening vs latest odds, movement delta, per sportsbook per side
 
 > **SportsDataIO is paused.** `backend/fetchers/sportsdataio.py` is fully
 > written and ready, but not used yet. We may bring it back later if needed.
@@ -78,9 +78,10 @@ Focus areas: moneylines, player props, batter vs pitcher matchups, line movement
 ### Phase 2 — Backend API
 - [x] Build FastAPI server
 - [x] Endpoints for games, teams, odds (read-only)
+- [x] Line movement tracking endpoint (`GET /odds/movement` + `GET /odds/movement/summary`)
+- [x] Research Layer endpoint (`GET /research/today` — consolidated aggregation)
 - [ ] Endpoint for players
 - [ ] Batter vs Pitcher stats endpoint
-- [ ] Line movement tracking endpoint
 
 ### Phase 3 — Frontend Dashboard (Current — Dashboard MVP)
 
@@ -174,17 +175,46 @@ Focus areas: moneylines, player props, batter vs pitcher matchups, line movement
 > Tailwind, no charts. A `null` pitcher renders as `"-"`. Verified live
 > with a headless Chrome render: all 10 games rendered with 0 mismatches
 > vs. the API response, including both `null` away-pitcher games showing
-> `"-"`. No backend, schema, or ingestion changes. See `CURRENT_STATUS.md`
-> for details.
+> `"-"`. No backend, schema, or ingestion changes.
+
+> **Line Movement v1 (2026-06-16).** `GET /odds/movement` returns one row
+> per game × sportsbook × side (home/away) showing opening moneyline,
+> latest moneyline, and movement delta. Optional `game_id` and `sportsbook`
+> query params for filtering. `GET /odds/movement/summary` returns only rows
+> where movement ≠ 0, sorted by |movement| descending. Both endpoints are
+> read-only with no edge calculations.
+
+> **Line Movement table on dashboard (2026-06-16).** `frontend/app/page.tsx`
+> adds a second table below the games table, fetching `GET /odds/movement`.
+> Movement cells are color-coded: green (positive), crimson (negative),
+> gray (zero/unchanged). Timestamps formatted as "Jun 16, 3:41 AM". Loading,
+> error, and empty states handled. Verified with headless Playwright: 80
+> rows returned, all states render correctly, no console errors.
+
+> **Research Layer (2026-06-16).** `GET /research/today` consolidates all
+> data for today's games into one response per game: game metadata, team
+> records, probable pitchers, latest odds with implied probabilities, and
+> line movement (opening vs latest per sportsbook per side). Games with no
+> odds return `"odds": []` and `"line_movement": []`. Verified against all
+> three source endpoints with 0 mismatches across 15 games.
+
+> **Dashboard Refactor v1 (2026-06-16).** Replaced two separate fetches
+> (`/games/today-with-odds` + `/odds/movement`) with a single fetch to
+> `GET /research/today`. Line movement table now uses per-game
+> `line_movement` arrays flattened into a single list. Stable React keys
+> (`game_id-sportsbook-side`). Verified: 0 console errors, 0 network
+> errors, all 15 games and 24 movement rows render correctly.
 
 - [x] Set up Next.js project
 - [x] Today's games page
 - [x] Display moneyline odds + implied probability on today's games page
 - [x] Display probable pitchers and team records on today's games page
+- [x] Line movement table (opening/latest/delta, color-coded, per sportsbook per side)
+- [x] Dashboard refactored to use `GET /research/today` as the single data source
 - [ ] Team matchup page
 - [ ] Player props page
 - [ ] Batter vs Pitcher analysis page
-- [ ] Line movement charts
+- [ ] Line movement charts (visual)
 
 ### Phase 4 — Advanced Features
 - [ ] Parlay builder

@@ -25,9 +25,13 @@ That's it. No props. No parlays. No advanced stats.
 
 > **Data source update (2026-06-10):** Games, starting pitchers, and team
 > records now come from the **free MLB Stats API** (no key needed).
-> SportsDataIO is paused but kept ready for later — likely for odds data,
-> since the free API doesn't provide betting lines. A source for moneyline
-> odds is still TBD (Step 3 in PROJECT_PLAN.md).
+> SportsDataIO is paused but kept ready for later.
+
+> **Odds source confirmed (2026-06-16):** Moneyline odds come from
+> **OddsAPI.io** (free tier). The free tier locks the account to two
+> sportsbooks: **Bet365** and **DraftKings**. Both are saved in
+> `odds_history` with a `sportsbook` column and a timestamp, enabling
+> line movement tracking.
 
 If you can sit down each morning, look at the day's games, see who's pitching,
 see the odds, and see if the line has moved — Version 1 is a success.
@@ -227,12 +231,14 @@ Step 6 — Line movement view
 
 Version 1 is complete when you can do this:
 
-1. Open the dashboard in a browser
-2. See all of today's MLB games
-3. See the starting pitcher for each game
-4. See each team's win/loss record
-5. See the current moneyline for each game
-6. Click a game and see how the line has moved throughout the day
+1. ✅ Open the dashboard in a browser
+2. ✅ See all of today's MLB games
+3. ✅ See the starting pitcher for each game
+4. ✅ See each team's win/loss record
+5. ✅ See the current moneyline for each game
+6. ✅ See how the line has moved (line movement table per sportsbook per side)
+
+**Version 1 is complete as of 2026-06-16.** The dashboard shows all six items above using a single consolidated `GET /research/today` endpoint. Line movement is shown as a table (not a per-game chart — that is a Phase 4 enhancement).
 
 That is the whole thing. Clean, useful, fast to build.
 

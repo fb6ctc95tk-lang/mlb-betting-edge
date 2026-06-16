@@ -46,9 +46,12 @@ Endpoints we may use later (once we add odds data):
 
 Code lives in `backend/fetchers/sportsdataio.py`, ready but not active.
 
-## Odds Data (Not Yet Decided)
+## Odds Data (Active — OddsAPI.io)
 
-Free official MLB data does not include betting odds. We need to pick a
-source for moneylines and line movement before Step 3. Options to evaluate:
-- The Odds API (free tier, separate signup required)
-- Reactivating SportsDataIO's odds endpoint (paid)
+Moneyline odds come from **OddsAPI.io** (free tier). The free tier locks
+the account to two sportsbooks: **Bet365** and **DraftKings**. Odds are
+fetched via `backend/fetchers/odds_api_io.py` and saved into
+`odds_history` with a `sportsbook` column and a `recorded_at` timestamp.
+Multiple snapshots per game enable line movement tracking.
+
+Setup instructions: see `docs/ODDS_API_SETUP.md`.
