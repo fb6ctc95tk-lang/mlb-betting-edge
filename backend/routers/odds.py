@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from typing import Optional
 
 from fastapi import APIRouter, HTTPException
 
@@ -66,24 +67,39 @@ def get_latest_odds():
 
 
 @router.get("/movement")
-def get_odds_movement():
+def get_odds_movement(
+    game_id: Optional[int] = None,
+    sportsbook: Optional[str] = None,
+):
     try:
         conn = get_db_connection()
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Database connection failed: {e}")
 
+    conditions = []
+    params: list = []
+    if game_id is not None:
+        conditions.append("game_id = %s")
+        params.append(game_id)
+    if sportsbook is not None:
+        conditions.append("sportsbook = %s")
+        params.append(sportsbook)
+    where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+
     try:
         cur = conn.cursor()
         cur.execute(
-            """
+            f"""
             WITH opening AS (
                 SELECT DISTINCT ON (game_id, sportsbook) *
                 FROM odds_history
+                {where}
                 ORDER BY game_id, sportsbook, recorded_at ASC
             ),
             latest AS (
                 SELECT DISTINCT ON (game_id, sportsbook) *
                 FROM odds_history
+                {where}
                 ORDER BY game_id, sportsbook, recorded_at DESC
             )
             SELECT
@@ -103,7 +119,8 @@ def get_odds_movement():
             JOIN teams ht  ON ht.id = g.home_team_id
             JOIN teams at  ON at.id = g.away_team_id
             ORDER BY op.game_id, op.sportsbook
-            """
+            """,
+            params * 2,
         )
         rows = cur.fetchall()
         cur.close()

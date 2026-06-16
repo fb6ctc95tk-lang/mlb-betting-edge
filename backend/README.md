@@ -167,23 +167,39 @@ python test_mlb_stats_api.py
 
 Returns one entry per game × sportsbook × side (home/away).
 
-```json
-[
-  {
-    "game_id": 1,
-    "sportsbook": "Bet365",
-    "team": "NYY",
-    "side": "home",
-    "opening_moneyline": -140,
-    "latest_moneyline": -155,
-    "movement": -15,
-    "opening_timestamp": "2026-06-16T08:00:00Z",
-    "latest_timestamp": "2026-06-16T14:30:00Z"
-  }
-]
+**Optional query parameters:**
+
+| Parameter | Type | Example | Effect |
+|-----------|------|---------|--------|
+| `game_id` | integer | `?game_id=16` | Only rows for that game |
+| `sportsbook` | string | `?sportsbook=Bet365` | Only rows for that sportsbook |
+
+Both filters can be combined: `?game_id=16&sportsbook=Bet365`
+
+**Example calls:**
+```
+GET /odds/movement                          # all games, all sportsbooks
+GET /odds/movement?game_id=16              # one game, both sportsbooks
+GET /odds/movement?sportsbook=DraftKings   # all games, DraftKings only
+GET /odds/movement?game_id=16&sportsbook=Bet365  # one game, one sportsbook
 ```
 
-`movement = latest_moneyline - opening_moneyline`. Negative = line moved toward the favorite; positive = moved toward the underdog. Returns an empty list `[]` when there is only one snapshot per game (no movement yet to calculate).
+**Example response (one entry):**
+```json
+{
+  "game_id": 16,
+  "sportsbook": "Bet365",
+  "team": "PHI",
+  "side": "home",
+  "opening_moneyline": -213,
+  "latest_moneyline": -222,
+  "movement": -9,
+  "opening_timestamp": "2026-06-15T02:11:33-04:00",
+  "latest_timestamp": "2026-06-15T03:41:04-04:00"
+}
+```
+
+`movement = latest_moneyline - opening_moneyline`. Negative = line moved toward the favorite; positive = moved toward the underdog. Returns `[]` when no data matches the filters, or when there is only one snapshot per game (opening = latest, movement = 0).
 
 ---
 
