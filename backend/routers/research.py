@@ -141,6 +141,7 @@ def get_research_today():
     ) in movement_rows:
         entries = movement_by_game.setdefault(game_id, [])
         entries.append({
+            "game_id": game_id,
             "sportsbook": sportsbook,
             "team": home_team,
             "side": "home",
@@ -151,6 +152,7 @@ def get_research_today():
             "latest_timestamp": latest_ts,
         })
         entries.append({
+            "game_id": game_id,
             "sportsbook": sportsbook,
             "team": away_team,
             "side": "away",

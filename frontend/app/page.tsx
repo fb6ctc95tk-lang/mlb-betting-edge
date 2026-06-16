@@ -9,21 +9,6 @@ type Odds = {
   away_implied_probability: number;
   home_moneyline: number;
   home_implied_probability: number;
-  recorded_at: string;
-};
-
-type Game = {
-  game_id: number;
-  game_date: string;
-  game_time: string | null;
-  away_team: string;
-  home_team: string;
-  away_pitcher: string | null;
-  home_pitcher: string | null;
-  away_record: string | null;
-  home_record: string | null;
-  status: string;
-  odds: Odds[];
 };
 
 type Movement = {
@@ -36,6 +21,21 @@ type Movement = {
   movement: number;
   opening_timestamp: string;
   latest_timestamp: string;
+};
+
+type Game = {
+  game_id: number;
+  game_date: string;
+  game_time: string | null;
+  status: string;
+  away_team: string;
+  home_team: string;
+  away_pitcher: string | null;
+  home_pitcher: string | null;
+  away_record: string | null;
+  home_record: string | null;
+  odds: Odds[];
+  line_movement: Movement[];
 };
 
 const cellStyle: CSSProperties = {
@@ -75,13 +75,11 @@ function movementColor(value: number): string {
 export default function Home() {
   const [games, setGames] = useState<Game[] | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [movement, setMovement] = useState<Movement[] | null>(null);
-  const [movementError, setMovementError] = useState<string | null>(null);
 
   useEffect(() => {
     const apiUrl = process.env.NEXT_PUBLIC_API_URL;
 
-    fetch(`${apiUrl}/games/today-with-odds`)
+    fetch(`${apiUrl}/research/today`)
       .then((res) => {
         if (!res.ok) {
           throw new Error(`Request failed with status ${res.status}`);
@@ -92,19 +90,9 @@ export default function Home() {
       .catch((err) => {
         setError(err instanceof Error ? err.message : "Unknown error");
       });
-
-    fetch(`${apiUrl}/odds/movement`)
-      .then((res) => {
-        if (!res.ok) {
-          throw new Error(`Request failed with status ${res.status}`);
-        }
-        return res.json();
-      })
-      .then((data: Movement[]) => setMovement(data))
-      .catch((err) => {
-        setMovementError(err instanceof Error ? err.message : "Unknown error");
-      });
   }, []);
+
+  const allMovement = games?.flatMap((g) => g.line_movement) ?? [];
 
   return (
     <main style={{ padding: "2rem", fontFamily: "Arial, sans-serif" }}>
@@ -184,19 +172,17 @@ export default function Home() {
 
       <h2 style={{ marginTop: "2.5rem" }}>Line Movement</h2>
 
-      {movementError && (
-        <p style={{ color: "red" }}>
-          Error loading line movement: {movementError}
-        </p>
+      {error && (
+        <p style={{ color: "red" }}>Error loading line movement: {error}</p>
       )}
 
-      {!movementError && movement === null && <p>Loading line movement...</p>}
+      {!error && games === null && <p>Loading line movement...</p>}
 
-      {!movementError && movement !== null && movement.length === 0 && (
+      {!error && games !== null && allMovement.length === 0 && (
         <p>No line movement data available.</p>
       )}
 
-      {!movementError && movement !== null && movement.length > 0 && (
+      {!error && games !== null && allMovement.length > 0 && (
         <table style={{ borderCollapse: "collapse", width: "100%", marginTop: "0.5rem" }}>
           <thead>
             <tr>
@@ -212,8 +198,8 @@ export default function Home() {
             </tr>
           </thead>
           <tbody>
-            {movement.map((row, i) => (
-              <tr key={i}>
+            {allMovement.map((row) => (
+              <tr key={`${row.game_id}-${row.sportsbook}-${row.side}`}>
                 <td style={cellStyle}>{row.game_id}</td>
                 <td style={cellStyle}>{row.sportsbook}</td>
                 <td style={cellStyle}>{row.team}</td>
