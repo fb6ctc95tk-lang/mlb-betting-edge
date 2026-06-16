@@ -1,7 +1,7 @@
 # MLB Betting Edge — Python dependencies
 # Install with: pip install -r requirements.txt
 
-# Makes HTTP requests to the SportsDataIO API
+# Makes HTTP requests to external APIs (MLB Stats API, OddsAPI.io)
 requests==2.32.3
 
 # Loads variables from the .env file into Python

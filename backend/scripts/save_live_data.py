@@ -2,8 +2,8 @@
 Fetches today's MLB games and current moneyline odds, then saves them
 to the local PostgreSQL database.
 
-Run from the backend/ folder:
-    python scripts/save_live_data.py
+Run from the repo root:
+    backend/venv/Scripts/python.exe backend/scripts/save_live_data.py
 """
 
 import os

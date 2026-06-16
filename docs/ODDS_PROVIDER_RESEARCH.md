@@ -136,13 +136,18 @@ free tier, for no real cost advantage.
 
 ---
 
-## What's NOT Decided Yet (Next Steps)
+## Outcome (2026-06-16)
 
-- [ ] Confirm OddsAPI.io's exact MLB endpoint shape and signup process
-- [ ] Confirm whether OddsAPI.io's free tier truly includes MLB moneyline
-      data with no hidden restrictions (verify with a real test call)
-- [ ] Design the `fetchers/odds_api_io.py` file using the same standard
-      shape as our other fetchers (not built yet — Step 4)
+OddsAPI.io was selected and is now active.
+
+- [x] Confirmed OddsAPI.io's MLB endpoint shape and signup process
+- [x] Confirmed free tier includes MLB moneyline data — live test call
+      returned Bet365 and DraftKings odds with no hidden restrictions
+- [x] Built `fetchers/odds_api_io.py` using the standard shape; integrated
+      into `backend/scripts/save_live_data.py`
+
+The free tier locks the account to two sportsbooks on first use. This
+project is locked to **Bet365** and **DraftKings**.
 
 ---
 

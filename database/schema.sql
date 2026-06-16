@@ -25,12 +25,12 @@ CREATE TABLE teams (
 -- -------------------------------------------------------------
 -- TABLE 2: games
 -- One row per MLB game. Home team hosts the game.
--- external_game_id is the ID from SportsDataIO so we can
--- match incoming API data to the right row.
+-- external_game_id is the MLB Stats API gamePk, used to match
+-- API updates to the right row without creating duplicates.
 -- -------------------------------------------------------------
 CREATE TABLE games (
     id                  SERIAL PRIMARY KEY,
-    external_game_id    VARCHAR(50)     NOT NULL,   -- SportsDataIO's game ID
+    external_game_id    VARCHAR(50)     NOT NULL,   -- MLB Stats API gamePk
     game_date           DATE            NOT NULL,
     game_time           VARCHAR(20),                -- e.g. "7:05 PM ET"
     home_team_id        INTEGER         NOT NULL REFERENCES teams(id),
@@ -47,7 +47,7 @@ CREATE TABLE games (
 -- -------------------------------------------------------------
 -- TABLE 3: starting_pitchers
 -- One row per game. Stores the starting pitcher names.
--- Pitcher names come from SportsDataIO.
+-- Pitcher names come from the MLB Stats API (probablePitcher).
 -- -------------------------------------------------------------
 CREATE TABLE starting_pitchers (
     id              SERIAL PRIMARY KEY,

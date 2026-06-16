@@ -1,217 +1,225 @@
 # Setup Guide — MLB Betting Edge
 
-This guide explains everything you need before writing a single line of code.
-No technical experience required.
+This guide explains how to get the project running locally from scratch.
 
 ---
 
-## 1. What Is SportsDataIO?
+## What You Need
 
-SportsDataIO is a company that collects sports data and sells access to it.
+| Requirement | What It Does | Cost |
+|---|---|---|
+| PostgreSQL | Local database | Free |
+| Python 3.11+ | Runs the backend and ingestion scripts | Free |
+| Node.js 18+ | Runs the Next.js frontend | Free |
+| OddsAPI.io account | Provides Bet365 + DraftKings moneyline odds | Free tier |
 
-Think of it like a newspaper stand. The newspaper (data) gets updated constantly —
-game schedules, scores, player stats, betting odds. You pay a subscription fee and
-they give you a private door to walk in and read whatever you need.
-
-In our case, we will use SportsDataIO to get:
-- Today's MLB game schedule
-- Starting pitcher announcements
-- Moneyline odds (and updates throughout the day)
-- Team win/loss records
-
-Without a data provider like this, you would have to manually collect all of this
-information yourself. That would take hours every day.
+Game data (schedule, pitchers, team records) comes from the **official MLB Stats API**, which requires no account and no API key.
 
 ---
 
-## 2. What Is an API Key?
+## 1. PostgreSQL
 
-**API** stands for "Application Programming Interface." That is a fancy term for
-a door that lets two programs talk to each other. Our Python code will knock on
-SportsDataIO's door and ask for data.
+PostgreSQL stores all game data, odds, and team records.
 
-An **API key** is your personal password for that door.
+### Install
 
-Real-world analogy:
+Download from: https://www.postgresql.org/download/windows/
 
-> Imagine a gym. Anyone can try to walk in, but you need a membership card to
-> get through the turnstile. Your API key is your membership card. It tells
-> SportsDataIO "this request is from a paying customer — let them in."
+During installation:
+- Set a password for the `postgres` user — write it down
+- Keep the default port (`5432`)
+- Keep all default components (PostgreSQL Server, pgAdmin, Command Line Tools)
 
-Every request we make to SportsDataIO will include our API key.
-Without it, the API will reject us and return an error.
-
----
-
-## 3. Where Do I Get the API Key?
-
-1. Go to **https://sportsdata.io**
-2. Click **"Sign Up"** or **"Free Trial"**
-3. Create an account with your email address
-4. Once logged in, navigate to **"My Account"** or **"API Keys"**
-5. You will see a key that looks something like this:
+### Verify
 
 ```
-a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4
+psql --version
 ```
 
-That long string of random letters and numbers is your API key. Copy it somewhere safe.
+Should print something like `psql (PostgreSQL) 17.x`.
 
-**Important:** You will need access to the **MLB** endpoints specifically.
-When signing up or managing your subscription, confirm you have access to:
-- MLB Game Scores & Schedules
-- MLB Odds (for moneyline data)
+### Create the database
+
+```
+psql -U postgres -c "CREATE DATABASE mlb_betting_edge;"
+```
+
+### Create the tables
+
+From the repo root:
+```
+psql -U postgres -d mlb_betting_edge -f database/schema.sql
+```
 
 ---
 
-## 4. How Much Does It Cost?
+## 2. OddsAPI.io API Key
 
-SportsDataIO pricing changes over time, so always check the current plans at:
-**https://sportsdata.io/mlb-api**
+OddsAPI.io provides Bet365 and DraftKings moneyline odds on a permanent free tier (100 requests/hour, no credit card required).
 
-**What to know before you sign up:**
+### Get a key
 
-- They offer a **free trial** (typically 14–30 days) — use this to build Version 1
-- After the trial, you pay a monthly subscription
-- **Stats data** (scores, schedules, standings) is cheaper
-- **Odds data** (moneylines, line movement) may require a separate or higher-tier plan
-- For a personal project, look for the lowest tier that includes both **MLB stats** and **MLB odds**
+1. Go to https://odds-api.io
+2. Create a free account
+3. Copy your API key from the dashboard
 
-**Budget tip:** Build the whole Version 1 dashboard during the free trial.
-Only pay once you know the data is flowing correctly and it's worth continuing.
+### Important: sportsbook lock-in
 
----
+The free tier locks your account to **2 sportsbooks on first use**. This project uses:
+- **Bet365**
+- **DraftKings**
 
-## 5. Where the API Key Will Be Stored in This Project
-
-Your API key will live in a file called **`.env`** inside the `backend` folder.
-
-```
-mlb-betting-edge/
-├── backend/
-│   └── .env          ← your secret keys live here (NEVER shared)
-├── .env.example      ← a safe template showing what variables are needed
-└── ...
-```
-
-The `.env` file is **private**. It never gets uploaded to GitHub or shared with
-anyone. The `.env.example` file is a blank template that shows what variables
-are needed — without the real values. That one is safe to share.
+The first time you call the odds API with these two sportsbook names, your key is locked to them. Do not change the `BOOKMAKERS` value in `fetchers/odds_api_io.py` unless you intend to reset your key.
 
 ---
 
-## 6. How Environment Variables Work
+## 3. Environment Variables
 
-An environment variable is a named value your program can read at runtime
-without it being written directly in the code.
+The backend reads two variables from `backend/.env`.
 
-Think of it like this:
+Create the file (copy from the example if it exists):
 
-> You are writing a letter to a friend. Instead of writing your home address
-> directly in the letter (where anyone who reads it would see it), you write
-> "see the envelope for my return address." The envelope is your `.env` file.
-> The letter is your code.
-
-Here is the difference in Python:
-
-**Bad — key is written directly in the code:**
-```python
-api_key = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4"
+```
+backend/.env
 ```
 
-**Good — key is read from an environment variable:**
-```python
-import os
-api_key = os.getenv("SPORTSDATAIO_API_KEY")
+Contents:
+```
+DATABASE_URL=postgresql://postgres:YOUR_PASSWORD@localhost:5432/mlb_betting_edge
+ODDS_API_KEY=your_oddsapiio_key_here
 ```
 
-In the good version, the code just says "go read the variable called
-`SPORTSDATAIO_API_KEY` from the environment." The actual value is stored
-in the `.env` file separately. The code and the secret never touch.
+Replace `YOUR_PASSWORD` with the PostgreSQL password you set during installation, and `your_oddsapiio_key_here` with your real OddsAPI.io key.
 
-**How Python loads `.env` files:**
-We use a library called `python-dotenv`. When your backend starts, it reads
-the `.env` file and loads all the variables into memory automatically.
-We will set this up in the next step.
+**Never commit `.env` to git.** It is already in `.gitignore`.
 
 ---
 
-## 7. Why We Never Save API Keys Directly in Code
+## 4. Backend Setup
 
-Three reasons:
+### Create a virtual environment (one time)
 
-**Reason 1 — Accidental sharing**
-Code gets shared. You might push it to GitHub, send it to a friend, or copy it
-into a forum asking for help. If your API key is written in the code, it goes
-with it. Someone can steal it and run up charges on your account.
+From the repo root:
+```
+cd backend
+python -m venv venv
+```
 
-**Reason 2 — You can't easily change it**
-If your API key expires or gets compromised, you have to hunt through every
-file to find and replace it. With environment variables, you change one line
-in one file.
+### Activate the virtual environment
 
-**Reason 3 — Different environments need different values**
-On your laptop (development), you use one database.
-On the live server (production), you use a different database.
-Environment variables let you swap these out without touching the code at all.
+Run this every time you open a new terminal:
 
-**The rule: treat an API key like a password. You would not write your
-banking password in a Python file. Do the same for API keys.**
+**Windows (PowerShell):**
+```
+backend\venv\Scripts\Activate.ps1
+```
+
+Your prompt will show `(venv)` when active.
+
+### Install packages
+
+```
+pip install -r backend/requirements.txt
+```
+
+### Verify the database connection
+
+```
+backend/venv/Scripts/python.exe backend/scripts/test_db_connection.py
+```
+
+Should print: `SUCCESS: Connected to PostgreSQL`
+
+### Run the ingestion script
+
+This fetches today's games, pitchers, records, and odds, and saves them to PostgreSQL:
+
+```
+backend/venv/Scripts/python.exe backend/scripts/save_live_data.py
+```
+
+Run this once per day (or any time you want fresh data).
+
+### Start the API server
+
+```
+backend/venv/Scripts/python.exe -m uvicorn backend.main:app --host 127.0.0.1 --port 8000
+```
+
+Test it:
+```
+curl http://localhost:8000/health
+```
+
+Should return: `{"status":"ok"}`
 
 ---
 
-## Variables We Will Need
+## 5. Frontend Setup
 
-These two variables power everything in Version 1.
+### Install packages
+
+```
+cd frontend
+npm install
+```
+
+### Environment variable
+
+The frontend reads one variable from `frontend/.env.local`. It should already exist with:
+
+```
+NEXT_PUBLIC_API_URL=http://localhost:8000
+```
+
+If the file is missing, create it with that content.
+
+### Start the dev server
+
+```
+cd frontend
+npm run dev
+```
+
+Open http://localhost:3000 in a browser.
 
 ---
 
-### `SPORTSDATAIO_API_KEY`
+## 6. Full Data Flow (How It All Fits Together)
 
-What it is: Your personal key from SportsDataIO.
+```
+MLB Stats API  ──┐
+                 ├──► save_live_data.py ──► PostgreSQL
+OddsAPI.io    ──┘
 
-How it gets used: Every API request we make will include this key in the URL
-or request header so SportsDataIO knows it's us.
+PostgreSQL ──► FastAPI (port 8000) ──► GET /research/today ──► Next.js (port 3000)
+```
 
-Example format: `a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4`
+The dashboard fetches `GET /research/today`, which returns today's games with
+odds, pitchers, records, and line movement in one consolidated response.
 
 ---
 
-### `DATABASE_URL`
+## 7. Checking Things Are Working
 
-What it is: The address of your PostgreSQL database, including login credentials.
-
-Think of it as the full address and key to your filing cabinet —
-it tells Python where the database lives and how to log into it.
-
-Format breakdown:
-```
-postgresql://username:password@host:port/database_name
-             │         │        │     │   └── name of your database
-             │         │        │     └─── port (PostgreSQL default is 5432)
-             │         │        └───────── host (localhost = your own machine)
-             │         └────────────────── your PostgreSQL password
-             └──────────────────────────── your PostgreSQL username
-```
-
-Local development example:
-```
-postgresql://postgres:mypassword@localhost:5432/mlb_betting_edge
-```
-
-When we move to Supabase later, this URL will change to point to their servers
-instead of your local machine — and we just update this one variable.
+| Check | Command |
+|---|---|
+| Database connected | `backend/venv/Scripts/python.exe backend/scripts/test_db_connection.py` |
+| MLB data fetches | `backend/venv/Scripts/python.exe backend/test_mlb_stats_api.py` |
+| Odds data fetches | `backend/venv/Scripts/python.exe backend/test_odds_fetcher.py` |
+| Backend health | `curl http://localhost:8000/health` |
+| Research endpoint | `curl http://localhost:8000/research/today` |
+| Dashboard | Open http://localhost:3000 |
 
 ---
 
-## Summary Checklist
+## 8. Active vs Paused Data Sources
 
-Before running any code, you need:
+| Source | Status | What It Provides |
+|---|---|---|
+| MLB Stats API | **Active** — free, no key | Games, probable pitchers, team records |
+| OddsAPI.io | **Active** — requires `ODDS_API_KEY` | Bet365 + DraftKings moneylines |
+| SportsDataIO | **Paused** — requires paid key | Nothing currently; kept as future fallback |
 
-- [ ] A SportsDataIO account with MLB access
-- [ ] Your API key copied and ready
-- [ ] PostgreSQL installed on your machine
-- [ ] A database created called `mlb_betting_edge`
-- [ ] A `.env` file inside the `backend/` folder with both variables filled in
-
-The next step will walk through creating that `.env` file.
+The SportsDataIO fetcher (`backend/fetchers/sportsdataio.py`) is ready to use if
+needed later, but it is not called by any active code.

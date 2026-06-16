@@ -40,7 +40,7 @@ One row per MLB game. Stores the schedule and final scores.
 | Column           | Type    | Example              |
 |------------------|---------|----------------------|
 | id               | number  | 101                  |
-| external_game_id | text    | 60255 (SportsDataIO) |
+| external_game_id | text    | 60255 (MLB Stats API gamePk) |
 | game_date        | date    | 2026-06-08           |
 | game_time        | text    | 7:05 PM ET           |
 | home_team_id     | number  | 1 (→ teams table)    |
@@ -51,8 +51,9 @@ One row per MLB game. Stores the schedule and final scores.
 
 **Plain English:** A calendar page for every game. `home_team_id` and
 `away_team_id` are not team names — they are ID numbers that point to
-the `teams` table. `external_game_id` is the ID SportsDataIO uses for
-that game, so we can match API data to the right row.
+the `teams` table. `external_game_id` is the MLB Stats API's `gamePk`
+for that game, so we can match daily API updates to the right row
+without creating duplicates.
 
 **Status values:**
 - `scheduled` — game hasn't started
