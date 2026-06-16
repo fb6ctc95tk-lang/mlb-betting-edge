@@ -26,6 +26,18 @@ type Game = {
   odds: Odds[];
 };
 
+type Movement = {
+  game_id: number;
+  sportsbook: string;
+  team: string;
+  side: string;
+  opening_moneyline: number;
+  latest_moneyline: number;
+  movement: number;
+  opening_timestamp: string;
+  latest_timestamp: string;
+};
+
 const cellStyle: CSSProperties = {
   border: "1px solid #ccc",
   padding: "8px",
@@ -44,9 +56,27 @@ function formatProbability(value: number): string {
   return `${value.toFixed(2)}%`;
 }
 
+function formatTimestamp(ts: string): string {
+  return new Date(ts).toLocaleString("en-US", {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: true,
+  });
+}
+
+function movementColor(value: number): string {
+  if (value > 0) return "green";
+  if (value < 0) return "crimson";
+  return "#888";
+}
+
 export default function Home() {
   const [games, setGames] = useState<Game[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [movement, setMovement] = useState<Movement[] | null>(null);
+  const [movementError, setMovementError] = useState<string | null>(null);
 
   useEffect(() => {
     const apiUrl = process.env.NEXT_PUBLIC_API_URL;
@@ -62,12 +92,25 @@ export default function Home() {
       .catch((err) => {
         setError(err instanceof Error ? err.message : "Unknown error");
       });
+
+    fetch(`${apiUrl}/odds/movement`)
+      .then((res) => {
+        if (!res.ok) {
+          throw new Error(`Request failed with status ${res.status}`);
+        }
+        return res.json();
+      })
+      .then((data: Movement[]) => setMovement(data))
+      .catch((err) => {
+        setMovementError(err instanceof Error ? err.message : "Unknown error");
+      });
   }, []);
 
   return (
     <main style={{ padding: "2rem", fontFamily: "Arial, sans-serif" }}>
       <h1>MLB Betting Edge</h1>
-      <h2>Today&apos;s MLB Games</h2>
+
+      <h2 style={{ marginTop: "1.5rem" }}>Today&apos;s MLB Games</h2>
 
       {error && <p style={{ color: "red" }}>Error loading games: {error}</p>}
 
@@ -135,6 +178,55 @@ export default function Home() {
                 </tr>
               );
             })}
+          </tbody>
+        </table>
+      )}
+
+      <h2 style={{ marginTop: "2.5rem" }}>Line Movement</h2>
+
+      {movementError && (
+        <p style={{ color: "red" }}>
+          Error loading line movement: {movementError}
+        </p>
+      )}
+
+      {!movementError && movement === null && <p>Loading line movement...</p>}
+
+      {!movementError && movement !== null && movement.length === 0 && (
+        <p>No line movement data available.</p>
+      )}
+
+      {!movementError && movement !== null && movement.length > 0 && (
+        <table style={{ borderCollapse: "collapse", width: "100%", marginTop: "0.5rem" }}>
+          <thead>
+            <tr>
+              <th style={cellStyle}>Game ID</th>
+              <th style={cellStyle}>Sportsbook</th>
+              <th style={cellStyle}>Team</th>
+              <th style={cellStyle}>Side</th>
+              <th style={cellStyle}>Opening ML</th>
+              <th style={cellStyle}>Latest ML</th>
+              <th style={cellStyle}>Movement</th>
+              <th style={cellStyle}>Opening Time</th>
+              <th style={cellStyle}>Latest Time</th>
+            </tr>
+          </thead>
+          <tbody>
+            {movement.map((row, i) => (
+              <tr key={i}>
+                <td style={cellStyle}>{row.game_id}</td>
+                <td style={cellStyle}>{row.sportsbook}</td>
+                <td style={cellStyle}>{row.team}</td>
+                <td style={cellStyle}>{row.side}</td>
+                <td style={cellStyle}>{formatMoneyline(row.opening_moneyline)}</td>
+                <td style={cellStyle}>{formatMoneyline(row.latest_moneyline)}</td>
+                <td style={{ ...cellStyle, color: movementColor(row.movement), fontWeight: row.movement !== 0 ? "bold" : "normal" }}>
+                  {formatMoneyline(row.movement)}
+                </td>
+                <td style={cellStyle}>{formatTimestamp(row.opening_timestamp)}</td>
+                <td style={cellStyle}>{formatTimestamp(row.latest_timestamp)}</td>
+              </tr>
+            ))}
           </tbody>
         </table>
       )}
