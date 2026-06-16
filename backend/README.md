@@ -161,6 +161,7 @@ python test_mlb_stats_api.py
 | GET | `/odds/latest` | Latest moneyline per game and sportsbook |
 | GET | `/odds/today` | Latest moneylines for today's games |
 | GET | `/odds/movement` | Opening vs latest moneyline, movement delta, per game/sportsbook/side |
+| GET | `/odds/movement/summary` | Same as above but only rows where movement ≠ 0, sorted by \|movement\| descending |
 | GET | `/teams` | All teams |
 
 ### `/odds/movement` — Line Movement v1
@@ -200,6 +201,16 @@ GET /odds/movement?game_id=16&sportsbook=Bet365  # one game, one sportsbook
 ```
 
 `movement = latest_moneyline - opening_moneyline`. Negative = line moved toward the favorite; positive = moved toward the underdog. Returns `[]` when no data matches the filters, or when there is only one snapshot per game (opening = latest, movement = 0).
+
+### `/odds/movement/summary` — Line Movement Summary v1
+
+Returns only rows where `movement != 0`, sorted by `abs(movement)` descending (largest moves first). Same field shape as `/odds/movement`. No filter parameters.
+
+```
+GET /odds/movement/summary
+```
+
+Returns `[]` when no lines have moved yet. Useful as a quick feed of meaningful movement without scanning all 80+ rows.
 
 ---
 

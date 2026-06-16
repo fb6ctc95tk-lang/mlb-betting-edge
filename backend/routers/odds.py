@@ -66,6 +66,81 @@ def get_latest_odds():
     return odds
 
 
+@router.get("/movement/summary")
+def get_odds_movement_summary():
+    try:
+        conn = get_db_connection()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Database connection failed: {e}")
+
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            WITH opening AS (
+                SELECT DISTINCT ON (game_id, sportsbook) *
+                FROM odds_history
+                ORDER BY game_id, sportsbook, recorded_at ASC
+            ),
+            latest AS (
+                SELECT DISTINCT ON (game_id, sportsbook) *
+                FROM odds_history
+                ORDER BY game_id, sportsbook, recorded_at DESC
+            )
+            SELECT
+                op.game_id,
+                op.sportsbook,
+                ht.abbreviation AS home_team,
+                at.abbreviation AS away_team,
+                op.home_moneyline  AS opening_home_moneyline,
+                op.away_moneyline  AS opening_away_moneyline,
+                op.recorded_at     AS opening_timestamp,
+                la.home_moneyline  AS latest_home_moneyline,
+                la.away_moneyline  AS latest_away_moneyline,
+                la.recorded_at     AS latest_timestamp
+            FROM opening op
+            JOIN latest la ON la.game_id = op.game_id AND la.sportsbook = op.sportsbook
+            JOIN games g   ON g.id  = op.game_id
+            JOIN teams ht  ON ht.id = g.home_team_id
+            JOIN teams at  ON at.id = g.away_team_id
+            """
+        )
+        rows = cur.fetchall()
+        cur.close()
+    except Exception as e:
+        conn.close()
+        raise HTTPException(status_code=500, detail=f"Database query failed: {e}")
+
+    conn.close()
+
+    summary = []
+    for (
+        game_id, sportsbook, home_team, away_team,
+        opening_home_ml, opening_away_ml, opening_ts,
+        latest_home_ml, latest_away_ml, latest_ts,
+    ) in rows:
+        for team, side, opening_ml, latest_ml in (
+            (home_team, "home", opening_home_ml, latest_home_ml),
+            (away_team, "away", opening_away_ml, latest_away_ml),
+        ):
+            movement = latest_ml - opening_ml
+            if movement != 0:
+                summary.append({
+                    "game_id": game_id,
+                    "sportsbook": sportsbook,
+                    "team": team,
+                    "side": side,
+                    "opening_moneyline": opening_ml,
+                    "latest_moneyline": latest_ml,
+                    "movement": movement,
+                    "opening_timestamp": opening_ts,
+                    "latest_timestamp": latest_ts,
+                })
+
+    summary.sort(key=lambda r: abs(r["movement"]), reverse=True)
+    return summary
+
+
 @router.get("/movement")
 def get_odds_movement(
     game_id: Optional[int] = None,
