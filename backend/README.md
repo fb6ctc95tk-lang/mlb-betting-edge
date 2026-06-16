@@ -162,6 +162,7 @@ python test_mlb_stats_api.py
 | GET | `/odds/today` | Latest moneylines for today's games |
 | GET | `/odds/movement` | Opening vs latest moneyline, movement delta, per game/sportsbook/side |
 | GET | `/odds/movement/summary` | Same as above but only rows where movement ≠ 0, sorted by \|movement\| descending |
+| GET | `/research/today` | Consolidated research view: today's games with records, pitchers, latest odds, and line movement in one response |
 | GET | `/teams` | All teams |
 
 ### `/odds/movement` — Line Movement v1
@@ -211,6 +212,61 @@ GET /odds/movement/summary
 ```
 
 Returns `[]` when no lines have moved yet. Useful as a quick feed of meaningful movement without scanning all 80+ rows.
+
+---
+
+### `/research/today` — Consolidated Research View
+
+Read-only endpoint that combines all available data for today's games into one response per game. This endpoint does **not** calculate betting edges, picks, recommendations, or probabilities beyond implied odds math.
+
+```
+GET /research/today
+```
+
+Each game object includes:
+- Game metadata (date, time, status)
+- Team abbreviations, records, and probable pitchers
+- `odds` — latest moneyline per sportsbook with implied probabilities (empty array if no odds)
+- `line_movement` — opening vs latest moneyline per sportsbook per side (empty array if no odds history)
+
+**Example response (one game with odds):**
+```json
+{
+  "game_id": 46,
+  "game_date": "2026-06-16",
+  "game_time": "22:40",
+  "status": "scheduled",
+  "away_team": "MIA",
+  "home_team": "PHI",
+  "away_record": "36-37",
+  "home_record": "39-33",
+  "away_pitcher": "Tyler Phillips",
+  "home_pitcher": "Jesús Luzardo",
+  "odds": [
+    {
+      "sportsbook": "Bet365",
+      "away_moneyline": 150,
+      "away_implied_probability": 40.0,
+      "home_moneyline": -182,
+      "home_implied_probability": 64.54
+    }
+  ],
+  "line_movement": [
+    {
+      "sportsbook": "Bet365",
+      "team": "PHI",
+      "side": "home",
+      "opening_moneyline": -173,
+      "latest_moneyline": -182,
+      "movement": -9,
+      "opening_timestamp": "2026-06-15T02:11:33-04:00",
+      "latest_timestamp": "2026-06-16T03:41:34-04:00"
+    }
+  ]
+}
+```
+
+Games with no posted odds still appear; their `odds` and `line_movement` arrays are empty.
 
 ---
 

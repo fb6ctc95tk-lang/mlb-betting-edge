@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from .routers import games, odds, teams
+from .routers import games, odds, research, teams
 
 app = FastAPI(title="MLB Betting Edge API", version="0.1.0")
 
@@ -15,6 +15,7 @@ app.add_middleware(
 app.include_router(games.router, prefix="/games", tags=["games"])
 app.include_router(odds.router, prefix="/odds", tags=["odds"])
 app.include_router(teams.router, prefix="/teams", tags=["teams"])
+app.include_router(research.router, prefix="/research", tags=["research"])
 
 
 @app.get("/health")
