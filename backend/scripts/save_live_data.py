@@ -4,8 +4,10 @@ to the local PostgreSQL database.
 
 Run from the repo root:
     backend/venv/Scripts/python.exe backend/scripts/save_live_data.py
+    backend/venv/Scripts/python.exe backend/scripts/save_live_data.py --date 2026-06-16
 """
 
+import argparse
 import os
 import sys
 from datetime import datetime, timedelta
@@ -265,12 +267,19 @@ def save_odds(cur, saved_games, odds_records):
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--date", default=None, help="Date to fetch in YYYY-MM-DD format (default: today)")
+    args = parser.parse_args()
+
     if not DATABASE_URL:
         print("FAILED: DATABASE_URL is not set in backend/.env")
         sys.exit(1)
 
-    print("Fetching today's games from MLB Stats API...")
-    games = mlb_stats_api.get_todays_games()
+    target_date = args.date
+    date_label = target_date if target_date else "today"
+
+    print(f"Fetching games for {date_label} from MLB Stats API...")
+    games = mlb_stats_api.get_todays_games(target_date)
     print(f"  Found {len(games)} games")
 
     print("Fetching team records from MLB Stats API...")
