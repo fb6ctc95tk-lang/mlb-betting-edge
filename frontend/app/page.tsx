@@ -23,6 +23,14 @@ type Movement = {
   latest_timestamp: string;
 };
 
+type TeamForm = {
+  last_10_games_count: number;
+  last_10_wins: number;
+  last_10_losses: number;
+  last_10_record: string;
+  last_10_run_diff: number;
+};
+
 type Game = {
   game_id: number;
   game_date: string;
@@ -34,6 +42,8 @@ type Game = {
   home_pitcher: string | null;
   away_record: string | null;
   home_record: string | null;
+  away_team_form: TeamForm | null;
+  home_team_form: TeamForm | null;
   odds: Odds[];
   line_movement: Movement[];
 };
@@ -70,6 +80,14 @@ function movementColor(value: number): string {
   if (value > 0) return "green";
   if (value < 0) return "crimson";
   return "#888";
+}
+
+function formatTeamForm(form: TeamForm | null): string {
+  if (!form || form.last_10_games_count === 0) return "-";
+  const n = form.last_10_games_count;
+  const label = n < 10 ? `Last ${n}` : "Last 10";
+  const sign = form.last_10_run_diff >= 0 ? "+" : "";
+  return `${label}: ${form.last_10_record}, Run Diff: ${sign}${form.last_10_run_diff}`;
 }
 
 export default function Home() {
@@ -120,6 +138,8 @@ export default function Home() {
               <th style={cellStyle}>Home Pitcher</th>
               <th style={cellStyle}>Away Record</th>
               <th style={cellStyle}>Home Record</th>
+              <th style={cellStyle}>Away Last 10</th>
+              <th style={cellStyle}>Home Last 10</th>
               <th style={cellStyle}>Bet365 Moneyline (Away / Home)</th>
               <th style={cellStyle}>Bet365 Implied Prob (Away / Home)</th>
               <th style={cellStyle}>DraftKings Moneyline (Away / Home)</th>
@@ -143,6 +163,8 @@ export default function Home() {
                   <td style={cellStyle}>{game.home_pitcher ?? "-"}</td>
                   <td style={cellStyle}>{game.away_record ?? "-"}</td>
                   <td style={cellStyle}>{game.home_record ?? "-"}</td>
+                  <td style={cellStyle}>{formatTeamForm(game.away_team_form)}</td>
+                  <td style={cellStyle}>{formatTeamForm(game.home_team_form)}</td>
                   <td style={cellStyle}>
                     {bet365
                       ? `${formatMoneyline(bet365.away_moneyline)} / ${formatMoneyline(bet365.home_moneyline)}`

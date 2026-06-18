@@ -1,10 +1,10 @@
 # Project Status
 
-Last updated: 2026-06-16
+Last updated: 2026-06-18
 
 ## Current Phase
 
-Phase 1 MVP — complete. Phase 3 dashboard features complete through Research Layer refactor.
+Phase 1 MVP — complete. Phase 3 dashboard features complete through Team Form v1.
 
 ---
 
@@ -39,6 +39,14 @@ Phase 1 MVP — complete. Phase 3 dashboard features complete through Research L
 - [x] Team records columns
 - [x] Line movement table (opening/latest/delta per sportsbook per side)
 - [x] Dashboard refactored to use `GET /research/today` as the single data source
+
+### Team Form v1 (Phase 3 continued)
+- [x] `backend/services/team_form.py` — `get_team_last_10_form(conn, team_id, before_date)` service function
+- [x] `GET /research/today` extended with `away_team_form` and `home_team_form` per game
+- [x] Form data: last_10_games_count, last_10_wins, last_10_losses, last_10_record, last_10_run_diff
+- [x] Safe fallback when fewer than 10 completed games exist (returns actual count)
+- [x] Dashboard displays "Last 10: 7-3, Run Diff: +18" (or "Last N:" if fewer than 10 games)
+- [x] Only uses completed final games with non-null scores; excludes today's games
 
 ---
 
