@@ -4,7 +4,7 @@ Last updated: 2026-06-18
 
 ## Current Phase
 
-Phase 1 MVP — complete. Phase 3 dashboard features complete through Team Form v1.
+Research Layer Expansion
 
 ---
 
@@ -72,12 +72,22 @@ PostgreSQL ──► FastAPI ──► GET /research/today ──► Next.js Das
 
 ---
 
-## What's Next (not started)
+## Completed (Research Layer Expansion)
 
-- Team matchup detail page
-- Player props page
-- Batter vs Pitcher analysis
-- Line movement charts
-- Cloud deployment (Supabase + Railway + Vercel)
+- [x] Line Movement Summary endpoint
+- [x] Consolidated Research Layer endpoint
+- [x] Dashboard Refactor v1
+- [x] Research Layer verification completed
+- [x] Dashboard uses `GET /research/today` as single data source
+- [x] Team Form v1 added to `/research/today`
+- [x] Dashboard displays Last 10 form with safe fallback
 
-See `PROJECT_PLAN.md` for the full roadmap.
+---
+
+## Current Focus
+
+Completed-game ingestion verification
+
+## Next Build Target
+
+Confirm `save_live_data.py` updates scheduled games to final and stores final scores in PostgreSQL.
