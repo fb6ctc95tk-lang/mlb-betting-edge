@@ -267,6 +267,8 @@ def save_odds(cur, saved_games, odds_records):
 
 
 def main():
+    print(f"Run started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--date", default=None, help="Date to fetch in YYYY-MM-DD format (default: today)")
     args = parser.parse_args()
