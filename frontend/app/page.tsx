@@ -113,6 +113,15 @@ export default function Home() {
   const [games, setGames] = useState<Game[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [selectedDate, setSelectedDate] = useState<string>("");
+  const [availableDates, setAvailableDates] = useState<string[]>([]);
+
+  useEffect(() => {
+    const apiUrl = process.env.NEXT_PUBLIC_API_URL;
+    fetch(`${apiUrl}/research/available-dates`)
+      .then((res) => res.json())
+      .then((data) => setAvailableDates(data.available_dates ?? []))
+      .catch(() => {});
+  }, []);
 
   useEffect(() => {
     const apiUrl = process.env.NEXT_PUBLIC_API_URL;
@@ -146,13 +155,17 @@ export default function Home() {
         <label htmlFor="date-picker" style={{ marginRight: "0.5rem", fontWeight: "bold" }}>
           Date:
         </label>
-        <input
+        <select
           id="date-picker"
-          type="date"
           value={selectedDate}
           onChange={(e) => setSelectedDate(e.target.value)}
           style={{ padding: "4px", fontSize: "1rem" }}
-        />
+        >
+          <option value="">Today</option>
+          {availableDates.map((d) => (
+            <option key={d} value={d}>{d}</option>
+          ))}
+        </select>
         {selectedDate && (
           <button
             onClick={() => setSelectedDate("")}
