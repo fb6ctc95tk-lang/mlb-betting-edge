@@ -94,12 +94,13 @@ PostgreSQL ──► FastAPI ──► GET /research/today ──► Next.js Das
 - [x] Dashboard date picker added — browse any historical date via `GET /research/date/{date}`
 - [x] Default state loads today via `GET /research/today`
 - [x] Clearing date returns to today; heading and empty-state text update dynamically
+- [x] `GET /research/available-dates` — returns all distinct stored game dates, newest first
 
 ---
 
 ## Current Focus
 
-Research Layer Expansion — Next Feature Selection
+Research Layer Hardening
 
 ## Next Build Target
 

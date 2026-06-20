@@ -233,6 +233,26 @@ def get_research_today():
     return result
 
 
+@router.get("/available-dates")
+def get_available_dates():
+    try:
+        conn = get_db_connection()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Database connection failed: {e}")
+
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT DISTINCT game_date FROM games ORDER BY game_date DESC")
+        rows = cur.fetchall()
+        cur.close()
+    except Exception as e:
+        conn.close()
+        raise HTTPException(status_code=500, detail=f"Database query failed: {e}")
+
+    conn.close()
+    return {"available_dates": [row[0].isoformat() for row in rows]}
+
+
 @router.get("/date/{date_str}")
 def get_research_by_date(date_str: str):
     try:
