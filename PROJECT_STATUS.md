@@ -4,20 +4,20 @@ Last updated: 2026-06-20
 
 ## Current Phase
 
-Research Layer Expansion
+Operations Hardening
 
 ---
 
 ## Completed Milestones
 
-### Foundation (Phase 1)
+### Phase 1 — Foundation (Complete)
 - [x] PostgreSQL database schema (5 tables: teams, games, starting_pitchers, odds_history, team_records)
 - [x] MLB Stats API integration — games, probable pitchers, team records (free, no key)
 - [x] OddsAPI.io integration — Bet365 + DraftKings moneyline odds (free tier)
 - [x] Ingestion script: `backend/scripts/save_live_data.py` — runs daily to populate all tables
 - [x] All 30 MLB teams seeded
 
-### Backend (Phase 2)
+### Phase 2 — Backend API (Complete)
 - [x] FastAPI server with CORS
 - [x] `GET /health`
 - [x] `GET /games/today`
@@ -30,7 +30,7 @@ Research Layer Expansion
 - [x] `GET /teams`
 - [x] Implied probability math (`backend/odds_math.py`)
 
-### Frontend (Phase 3)
+### Phase 3 — Frontend (Complete)
 - [x] Next.js app (TypeScript, App Router)
 - [x] Today's games table with game time and status
 - [x] Moneyline odds columns (Bet365 + DraftKings)
@@ -40,13 +40,33 @@ Research Layer Expansion
 - [x] Line movement table (opening/latest/delta per sportsbook per side)
 - [x] Dashboard refactored to use `GET /research/today` as the single data source
 
-### Team Form v1 (Phase 3 continued)
-- [x] `backend/services/team_form.py` — `get_team_last_10_form(conn, team_id, before_date)` service function
-- [x] `GET /research/today` extended with `away_team_form` and `home_team_form` per game
-- [x] Form data: last_10_games_count, last_10_wins, last_10_losses, last_10_record, last_10_run_diff
-- [x] Safe fallback when fewer than 10 completed games exist (returns actual count)
-- [x] Dashboard displays "Last 10: 7-3, Run Diff: +18" (or "Last N:" if fewer than 10 games)
-- [x] Only uses completed final games with non-null scores; excludes today's games
+### Phase 4 — Research Layer Expansion (Complete)
+- [x] Team Form v1 — last 10 games: record + run differential per team
+- [x] Team Home/Away Splits v1 — road record for away team, home record for home team
+- [x] Team Streaks v1 — current win/loss streak per team
+- [x] All research data integrated into `GET /research/today`
+- [x] Dashboard displays form, splits, and streak columns
+- [x] Backfill support: `save_live_data.py --date YYYY-MM-DD`
+- [x] Historical data verified — 9 dates, 105+ final games stored
+
+### Phase 5 — Research Layer Hardening (Complete)
+- [x] `GET /research/date/{date}` — historical research for any stored date
+- [x] `GET /research/available-dates` — all distinct stored game dates, newest first
+- [x] Shared helper `_get_research_for_date(conn, target_date)` — no logic duplication
+- [x] Invalid date format returns 422 with clear message
+- [x] Dashboard date selector replaced `<input type="date">` with API-powered `<select>`
+- [x] Dashboard fetches available dates on load; dropdown shows only stored dates
+- [x] Default loads today; selecting a date calls `/research/date/{date}`
+- [x] Back to Today button clears selection and returns to `/research/today`
+- [x] Regression tests: `backend/tests/test_research_endpoints.py` — 9 tests, all passing
+- [x] Tests cover: status codes, response shape, research keys, date validation, routing
+
+### Phase 6 — Operations Hardening (In Progress)
+- [x] `backend/scripts/run_ingestion.bat` — automation wrapper for Task Scheduler
+- [x] Appends to `logs/ingestion.log` with start/end timestamps and exit code
+- [x] Run timestamp added to `save_live_data.py` output
+- [x] Task Scheduler commands documented (not yet registered)
+- [ ] Register Task Scheduler tasks (11 AM + optional 7 PM)
 
 ---
 
@@ -55,9 +75,11 @@ Research Layer Expansion
 ```
 MLB Stats API ──┐
                 ├──► save_live_data.py ──► PostgreSQL
-OddsAPI.io   ──┘
+OddsAPI.io   ──┘         ▲
+                          │
+                 run_ingestion.bat (manual or Task Scheduler)
 
-PostgreSQL ──► FastAPI ──► GET /research/today ──► Next.js Dashboard
+PostgreSQL ──► FastAPI ──► /research/* ──► Next.js Dashboard
 ```
 
 ---
@@ -72,36 +94,31 @@ PostgreSQL ──► FastAPI ──► GET /research/today ──► Next.js Das
 
 ---
 
-## Completed (Research Layer Expansion)
+## Current Endpoints
 
-- [x] Line Movement Summary endpoint
-- [x] Consolidated Research Layer endpoint
-- [x] Dashboard Refactor v1
-- [x] Research Layer verification completed
-- [x] Dashboard uses `GET /research/today` as single data source
-- [x] Team Form v1 added to `/research/today`
-- [x] Dashboard displays Last 10 form with safe fallback
-- [x] Backfill support added to `save_live_data.py` via `--date YYYY-MM-DD` argument
-- [x] Completed-game ingestion verified — final scores and statuses saved correctly
-- [x] Team Form v1 verified with real completed game data (wins, losses, run differential confirmed against source rows)
-- [x] Team Home/Away Splits v1 added to `/research/today` — away team road record, home team home record
-- [x] Dashboard displays road record for away team and home record for home team
-- [x] Team Streaks v1 added to `/research/today` — current win/loss streak per team
-- [x] Dashboard displays streak label (e.g. W3, L2) for away and home teams
-- [x] `GET /research/date/{date}` added — historical research for any stored date (YYYY-MM-DD)
-- [x] Shared logic extracted into `_get_research_for_date(conn, target_date)` — no duplication
-- [x] Invalid date format returns 422 with clear message
-- [x] Dashboard date picker added — browse any historical date via `GET /research/date/{date}`
-- [x] Default state loads today via `GET /research/today`
-- [x] Clearing date returns to today; heading and empty-state text update dynamically
-- [x] `GET /research/available-dates` — returns all distinct stored game dates, newest first
+| Endpoint | Purpose |
+|----------|---------|
+| `GET /health` | Server health check |
+| `GET /research/today` | All research data for today's games |
+| `GET /research/date/{date}` | All research data for a historical date |
+| `GET /research/available-dates` | All distinct stored game dates, newest first |
+| `GET /games/today` | Raw games only |
+| `GET /odds/movement` | Line movement with filters |
+| `GET /teams` | All 30 teams |
 
 ---
 
-## Current Focus
+## Current Test Coverage
 
-Research Layer Hardening
+- `backend/tests/test_research_endpoints.py` — 9 regression tests
+- Run with: `backend/venv/Scripts/python.exe -m pytest backend/tests/ -v`
+- Coverage: `/research/today`, `/research/date/{date}`, `/research/available-dates`
+- Tests hit real local PostgreSQL — no mocks
 
-## Next Build Target
+---
 
-Evaluate the next smallest Research Layer addition.
+## Pending
+
+- Register Task Scheduler tasks for automated daily ingestion
+  - 11 AM: `schtasks /create /tn "MLB Ingestion 11AM" /tr "C:\Users\rich-\RICH-LABS\mlb-betting-edge\backend\scripts\run_ingestion.bat" /sc daily /st 11:00 /ru %USERNAME% /f`
+  - 7 PM (optional): same command with `/tn "MLB Ingestion 7PM" /st 19:00`
