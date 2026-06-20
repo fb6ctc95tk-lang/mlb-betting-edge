@@ -88,6 +88,9 @@ PostgreSQL ──► FastAPI ──► GET /research/today ──► Next.js Das
 - [x] Dashboard displays road record for away team and home record for home team
 - [x] Team Streaks v1 added to `/research/today` — current win/loss streak per team
 - [x] Dashboard displays streak label (e.g. W3, L2) for away and home teams
+- [x] `GET /research/date/{date}` added — historical research for any stored date (YYYY-MM-DD)
+- [x] Shared logic extracted into `_get_research_for_date(conn, target_date)` — no duplication
+- [x] Invalid date format returns 422 with clear message
 
 ---
 
@@ -97,4 +100,4 @@ Research Layer Expansion — Next Feature Selection
 
 ## Next Build Target
 
-Evaluate the next smallest Research Layer addition after Team Streaks.
+Evaluate the next smallest Research Layer addition after Research Date Endpoint.

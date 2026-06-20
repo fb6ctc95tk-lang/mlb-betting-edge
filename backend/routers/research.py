@@ -10,129 +10,115 @@ from ..services.streak import get_team_streak
 router = APIRouter()
 
 
-@router.get("/today")
-def get_research_today():
-    try:
-        conn = get_db_connection()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Database connection failed: {e}")
+def _get_research_for_date(conn, target_date):
+    cur = conn.cursor()
 
-    today = datetime.now(timezone.utc).date()
+    cur.execute(
+        """
+        SELECT
+            g.id,
+            g.game_date,
+            g.game_time,
+            at.abbreviation AS away_team,
+            ht.abbreviation AS home_team,
+            g.status,
+            sp.away_pitcher,
+            sp.home_pitcher,
+            g.away_team_id,
+            g.home_team_id
+        FROM games g
+        JOIN teams ht ON ht.id = g.home_team_id
+        JOIN teams at ON at.id = g.away_team_id
+        LEFT JOIN starting_pitchers sp ON sp.game_id = g.id
+        WHERE g.game_date = %s
+        ORDER BY g.id
+        """,
+        (target_date,),
+    )
+    game_rows = cur.fetchall()
 
-    try:
-        cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT
+            o.game_id,
+            o.sportsbook,
+            o.away_moneyline,
+            o.home_moneyline
+        FROM (
+            SELECT DISTINCT ON (game_id, sportsbook) *
+            FROM odds_history
+            ORDER BY game_id, sportsbook, recorded_at DESC
+        ) o
+        JOIN games g ON g.id = o.game_id
+        WHERE g.game_date = %s
+        ORDER BY o.game_id, o.sportsbook
+        """,
+        (target_date,),
+    )
+    odds_rows = cur.fetchall()
 
-        cur.execute(
-            """
-            SELECT
-                g.id,
-                g.game_date,
-                g.game_time,
-                at.abbreviation AS away_team,
-                ht.abbreviation AS home_team,
-                g.status,
-                sp.away_pitcher,
-                sp.home_pitcher,
-                g.away_team_id,
-                g.home_team_id
-            FROM games g
-            JOIN teams ht ON ht.id = g.home_team_id
-            JOIN teams at ON at.id = g.away_team_id
-            LEFT JOIN starting_pitchers sp ON sp.game_id = g.id
-            WHERE g.game_date = %s
-            ORDER BY g.id
-            """,
-            (today,),
+    cur.execute(
+        """
+        SELECT DISTINCT ON (team_id)
+            team_id,
+            wins,
+            losses,
+            home_wins,
+            home_losses,
+            away_wins,
+            away_losses
+        FROM team_records
+        ORDER BY team_id, season DESC
+        """
+    )
+    record_rows = cur.fetchall()
+
+    cur.execute(
+        """
+        WITH opening AS (
+            SELECT DISTINCT ON (game_id, sportsbook) *
+            FROM odds_history
+            ORDER BY game_id, sportsbook, recorded_at ASC
+        ),
+        latest AS (
+            SELECT DISTINCT ON (game_id, sportsbook) *
+            FROM odds_history
+            ORDER BY game_id, sportsbook, recorded_at DESC
         )
-        game_rows = cur.fetchall()
+        SELECT
+            op.game_id,
+            op.sportsbook,
+            ht.abbreviation AS home_team,
+            at.abbreviation AS away_team,
+            op.home_moneyline  AS opening_home_ml,
+            op.away_moneyline  AS opening_away_ml,
+            op.recorded_at     AS opening_ts,
+            la.home_moneyline  AS latest_home_ml,
+            la.away_moneyline  AS latest_away_ml,
+            la.recorded_at     AS latest_ts
+        FROM opening op
+        JOIN latest la ON la.game_id = op.game_id AND la.sportsbook = op.sportsbook
+        JOIN games g   ON g.id  = op.game_id
+        JOIN teams ht  ON ht.id = g.home_team_id
+        JOIN teams at  ON at.id = g.away_team_id
+        WHERE g.game_date = %s
+        ORDER BY op.game_id, op.sportsbook
+        """,
+        (target_date,),
+    )
+    movement_rows = cur.fetchall()
 
-        cur.execute(
-            """
-            SELECT
-                o.game_id,
-                o.sportsbook,
-                o.away_moneyline,
-                o.home_moneyline
-            FROM (
-                SELECT DISTINCT ON (game_id, sportsbook) *
-                FROM odds_history
-                ORDER BY game_id, sportsbook, recorded_at DESC
-            ) o
-            JOIN games g ON g.id = o.game_id
-            WHERE g.game_date = %s
-            ORDER BY o.game_id, o.sportsbook
-            """,
-            (today,),
-        )
-        odds_rows = cur.fetchall()
+    cur.close()
 
-        cur.execute(
-            """
-            SELECT DISTINCT ON (team_id)
-                team_id,
-                wins,
-                losses,
-                home_wins,
-                home_losses,
-                away_wins,
-                away_losses
-            FROM team_records
-            ORDER BY team_id, season DESC
-            """
-        )
-        record_rows = cur.fetchall()
-
-        cur.execute(
-            """
-            WITH opening AS (
-                SELECT DISTINCT ON (game_id, sportsbook) *
-                FROM odds_history
-                ORDER BY game_id, sportsbook, recorded_at ASC
-            ),
-            latest AS (
-                SELECT DISTINCT ON (game_id, sportsbook) *
-                FROM odds_history
-                ORDER BY game_id, sportsbook, recorded_at DESC
-            )
-            SELECT
-                op.game_id,
-                op.sportsbook,
-                ht.abbreviation AS home_team,
-                at.abbreviation AS away_team,
-                op.home_moneyline  AS opening_home_ml,
-                op.away_moneyline  AS opening_away_ml,
-                op.recorded_at     AS opening_ts,
-                la.home_moneyline  AS latest_home_ml,
-                la.away_moneyline  AS latest_away_ml,
-                la.recorded_at     AS latest_ts
-            FROM opening op
-            JOIN latest la ON la.game_id = op.game_id AND la.sportsbook = op.sportsbook
-            JOIN games g   ON g.id  = op.game_id
-            JOIN teams ht  ON ht.id = g.home_team_id
-            JOIN teams at  ON at.id = g.away_team_id
-            WHERE g.game_date = %s
-            ORDER BY op.game_id, op.sportsbook
-            """,
-            (today,),
-        )
-        movement_rows = cur.fetchall()
-
-        cur.close()
-
-        unique_team_ids = {row[8] for row in game_rows} | {row[9] for row in game_rows}
-        form_by_team_id = {
-            team_id: get_team_last_10_form(conn, team_id, today)
-            for team_id in unique_team_ids
-        }
-        streak_by_team_id = {
-            team_id: get_team_streak(conn, team_id, today)
-            for team_id in unique_team_ids
-        }
-    except Exception as e:
-        conn.close()
-        raise HTTPException(status_code=500, detail=f"Database query failed: {e}")
-
-    conn.close()
+    unique_team_ids = {row[8] for row in game_rows} | {row[9] for row in game_rows}
+    form_by_team_id = {
+        team_id: get_team_last_10_form(conn, team_id, target_date)
+        for team_id in unique_team_ids
+    }
+    streak_by_team_id = {
+        team_id: get_team_streak(conn, team_id, target_date)
+        for team_id in unique_team_ids
+    }
 
     odds_by_game = {}
     for game_id, sportsbook, away_ml, home_ml in odds_rows:
@@ -226,3 +212,47 @@ def get_research_today():
         })
 
     return games
+
+
+@router.get("/today")
+def get_research_today():
+    try:
+        conn = get_db_connection()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Database connection failed: {e}")
+
+    target_date = datetime.now(timezone.utc).date()
+
+    try:
+        result = _get_research_for_date(conn, target_date)
+    except Exception as e:
+        conn.close()
+        raise HTTPException(status_code=500, detail=f"Database query failed: {e}")
+
+    conn.close()
+    return result
+
+
+@router.get("/date/{date_str}")
+def get_research_by_date(date_str: str):
+    try:
+        target_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+    except ValueError:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Invalid date format: '{date_str}'. Expected YYYY-MM-DD.",
+        )
+
+    try:
+        conn = get_db_connection()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Database connection failed: {e}")
+
+    try:
+        result = _get_research_for_date(conn, target_date)
+    except Exception as e:
+        conn.close()
+        raise HTTPException(status_code=500, detail=f"Database query failed: {e}")
+
+    conn.close()
+    return result
