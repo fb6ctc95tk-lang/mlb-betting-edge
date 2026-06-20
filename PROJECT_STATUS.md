@@ -1,6 +1,6 @@
 # Project Status
 
-Last updated: 2026-06-18
+Last updated: 2026-06-20
 
 ## Current Phase
 
@@ -81,13 +81,16 @@ PostgreSQL ──► FastAPI ──► GET /research/today ──► Next.js Das
 - [x] Dashboard uses `GET /research/today` as single data source
 - [x] Team Form v1 added to `/research/today`
 - [x] Dashboard displays Last 10 form with safe fallback
+- [x] Backfill support added to `save_live_data.py` via `--date YYYY-MM-DD` argument
+- [x] Completed-game ingestion verified — final scores and statuses saved correctly
+- [x] Team Form v1 verified with real completed game data (wins, losses, run differential confirmed against source rows)
 
 ---
 
 ## Current Focus
 
-Completed-game ingestion verification
+Research Layer Expansion — Next Feature Selection
 
 ## Next Build Target
 
-Confirm `save_live_data.py` updates scheduled games to final and stores final scores in PostgreSQL.
+Evaluate the next smallest Research Layer addition after Team Form.
