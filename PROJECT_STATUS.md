@@ -84,6 +84,8 @@ PostgreSQL ──► FastAPI ──► GET /research/today ──► Next.js Das
 - [x] Backfill support added to `save_live_data.py` via `--date YYYY-MM-DD` argument
 - [x] Completed-game ingestion verified — final scores and statuses saved correctly
 - [x] Team Form v1 verified with real completed game data (wins, losses, run differential confirmed against source rows)
+- [x] Team Home/Away Splits v1 added to `/research/today` — away team road record, home team home record
+- [x] Dashboard displays road record for away team and home record for home team
 
 ---
 
@@ -93,4 +95,4 @@ Research Layer Expansion — Next Feature Selection
 
 ## Next Build Target
 
-Evaluate the next smallest Research Layer addition after Team Form.
+Evaluate the next smallest Research Layer addition after Home/Away Splits.

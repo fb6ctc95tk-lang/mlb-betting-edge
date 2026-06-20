@@ -31,6 +31,15 @@ type TeamForm = {
   last_10_run_diff: number;
 };
 
+type TeamSplits = {
+  road_record?: string;
+  road_wins?: number;
+  road_losses?: number;
+  home_record?: string;
+  home_wins?: number;
+  home_losses?: number;
+};
+
 type Game = {
   game_id: number;
   game_date: string;
@@ -44,6 +53,8 @@ type Game = {
   home_record: string | null;
   away_team_form: TeamForm | null;
   home_team_form: TeamForm | null;
+  away_team_splits: TeamSplits | null;
+  home_team_splits: TeamSplits | null;
   odds: Odds[];
   line_movement: Movement[];
 };
@@ -138,6 +149,8 @@ export default function Home() {
               <th style={cellStyle}>Home Pitcher</th>
               <th style={cellStyle}>Away Record</th>
               <th style={cellStyle}>Home Record</th>
+              <th style={cellStyle}>Away Road Record</th>
+              <th style={cellStyle}>Home Record (Home)</th>
               <th style={cellStyle}>Away Last 10</th>
               <th style={cellStyle}>Home Last 10</th>
               <th style={cellStyle}>Bet365 Moneyline (Away / Home)</th>
@@ -163,6 +176,8 @@ export default function Home() {
                   <td style={cellStyle}>{game.home_pitcher ?? "-"}</td>
                   <td style={cellStyle}>{game.away_record ?? "-"}</td>
                   <td style={cellStyle}>{game.home_record ?? "-"}</td>
+                  <td style={cellStyle}>{game.away_team_splits?.road_record ?? "-"}</td>
+                  <td style={cellStyle}>{game.home_team_splits?.home_record ?? "-"}</td>
                   <td style={cellStyle}>{formatTeamForm(game.away_team_form)}</td>
                   <td style={cellStyle}>{formatTeamForm(game.home_team_form)}</td>
                   <td style={cellStyle}>

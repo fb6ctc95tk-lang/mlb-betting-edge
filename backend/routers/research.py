@@ -70,7 +70,11 @@ def get_research_today():
             SELECT DISTINCT ON (team_id)
                 team_id,
                 wins,
-                losses
+                losses,
+                home_wins,
+                home_losses,
+                away_wins,
+                away_losses
             FROM team_records
             ORDER BY team_id, season DESC
             """
@@ -137,7 +141,19 @@ def get_research_today():
 
     record_by_team_id = {
         team_id: f"{wins}-{losses}"
-        for team_id, wins, losses in record_rows
+        for team_id, wins, losses, home_wins, home_losses, away_wins, away_losses in record_rows
+    }
+
+    splits_by_team_id = {
+        team_id: {
+            "home_wins": home_wins,
+            "home_losses": home_losses,
+            "home_record": f"{home_wins}-{home_losses}",
+            "away_wins": away_wins,
+            "away_losses": away_losses,
+            "road_record": f"{away_wins}-{away_losses}",
+        }
+        for team_id, wins, losses, home_wins, home_losses, away_wins, away_losses in record_rows
     }
 
     movement_by_game = {}
@@ -188,6 +204,16 @@ def get_research_today():
             "home_pitcher": home_pitcher,
             "away_team_form": form_by_team_id.get(away_team_id),
             "home_team_form": form_by_team_id.get(home_team_id),
+            "away_team_splits": {
+                "road_record": splits_by_team_id[away_team_id]["road_record"],
+                "road_wins": splits_by_team_id[away_team_id]["away_wins"],
+                "road_losses": splits_by_team_id[away_team_id]["away_losses"],
+            } if away_team_id in splits_by_team_id else None,
+            "home_team_splits": {
+                "home_record": splits_by_team_id[home_team_id]["home_record"],
+                "home_wins": splits_by_team_id[home_team_id]["home_wins"],
+                "home_losses": splits_by_team_id[home_team_id]["home_losses"],
+            } if home_team_id in splits_by_team_id else None,
             "odds": odds_by_game.get(game_id, []),
             "line_movement": movement_by_game.get(game_id, []),
         })
