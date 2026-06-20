@@ -5,6 +5,7 @@ from fastapi import APIRouter, HTTPException
 from ..db import get_db_connection
 from ..odds_math import american_odds_to_implied_probability
 from ..services.team_form import get_team_last_10_form
+from ..services.streak import get_team_streak
 
 router = APIRouter()
 
@@ -123,6 +124,10 @@ def get_research_today():
             team_id: get_team_last_10_form(conn, team_id, today)
             for team_id in unique_team_ids
         }
+        streak_by_team_id = {
+            team_id: get_team_streak(conn, team_id, today)
+            for team_id in unique_team_ids
+        }
     except Exception as e:
         conn.close()
         raise HTTPException(status_code=500, detail=f"Database query failed: {e}")
@@ -204,6 +209,8 @@ def get_research_today():
             "home_pitcher": home_pitcher,
             "away_team_form": form_by_team_id.get(away_team_id),
             "home_team_form": form_by_team_id.get(home_team_id),
+            "away_team_streak": streak_by_team_id.get(away_team_id),
+            "home_team_streak": streak_by_team_id.get(home_team_id),
             "away_team_splits": {
                 "road_record": splits_by_team_id[away_team_id]["road_record"],
                 "road_wins": splits_by_team_id[away_team_id]["away_wins"],

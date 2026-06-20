@@ -86,6 +86,8 @@ PostgreSQL ──► FastAPI ──► GET /research/today ──► Next.js Das
 - [x] Team Form v1 verified with real completed game data (wins, losses, run differential confirmed against source rows)
 - [x] Team Home/Away Splits v1 added to `/research/today` — away team road record, home team home record
 - [x] Dashboard displays road record for away team and home record for home team
+- [x] Team Streaks v1 added to `/research/today` — current win/loss streak per team
+- [x] Dashboard displays streak label (e.g. W3, L2) for away and home teams
 
 ---
 
@@ -95,4 +97,4 @@ Research Layer Expansion — Next Feature Selection
 
 ## Next Build Target
 
-Evaluate the next smallest Research Layer addition after Home/Away Splits.
+Evaluate the next smallest Research Layer addition after Team Streaks.
