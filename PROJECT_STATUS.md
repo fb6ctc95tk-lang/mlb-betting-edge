@@ -91,6 +91,9 @@ PostgreSQL ──► FastAPI ──► GET /research/today ──► Next.js Das
 - [x] `GET /research/date/{date}` added — historical research for any stored date (YYYY-MM-DD)
 - [x] Shared logic extracted into `_get_research_for_date(conn, target_date)` — no duplication
 - [x] Invalid date format returns 422 with clear message
+- [x] Dashboard date picker added — browse any historical date via `GET /research/date/{date}`
+- [x] Default state loads today via `GET /research/today`
+- [x] Clearing date returns to today; heading and empty-state text update dynamically
 
 ---
 
@@ -100,4 +103,4 @@ Research Layer Expansion — Next Feature Selection
 
 ## Next Build Target
 
-Evaluate the next smallest Research Layer addition after Research Date Endpoint.
+Evaluate the next smallest Research Layer addition.

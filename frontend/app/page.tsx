@@ -112,11 +112,18 @@ function formatTeamForm(form: TeamForm | null): string {
 export default function Home() {
   const [games, setGames] = useState<Game[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [selectedDate, setSelectedDate] = useState<string>("");
 
   useEffect(() => {
     const apiUrl = process.env.NEXT_PUBLIC_API_URL;
+    const url = selectedDate
+      ? `${apiUrl}/research/date/${selectedDate}`
+      : `${apiUrl}/research/today`;
 
-    fetch(`${apiUrl}/research/today`)
+    setGames(null);
+    setError(null);
+
+    fetch(url)
       .then((res) => {
         if (!res.ok) {
           throw new Error(`Request failed with status ${res.status}`);
@@ -127,7 +134,7 @@ export default function Home() {
       .catch((err) => {
         setError(err instanceof Error ? err.message : "Unknown error");
       });
-  }, []);
+  }, [selectedDate]);
 
   const allMovement = games?.flatMap((g) => g.line_movement) ?? [];
 
@@ -135,14 +142,37 @@ export default function Home() {
     <main style={{ padding: "2rem", fontFamily: "Arial, sans-serif" }}>
       <h1>MLB Betting Edge</h1>
 
-      <h2 style={{ marginTop: "1.5rem" }}>Today&apos;s MLB Games</h2>
+      <div style={{ marginTop: "1.5rem" }}>
+        <label htmlFor="date-picker" style={{ marginRight: "0.5rem", fontWeight: "bold" }}>
+          Date:
+        </label>
+        <input
+          id="date-picker"
+          type="date"
+          value={selectedDate}
+          onChange={(e) => setSelectedDate(e.target.value)}
+          style={{ padding: "4px", fontSize: "1rem" }}
+        />
+        {selectedDate && (
+          <button
+            onClick={() => setSelectedDate("")}
+            style={{ marginLeft: "0.75rem", padding: "4px 10px", cursor: "pointer" }}
+          >
+            Back to Today
+          </button>
+        )}
+      </div>
+
+      <h2 style={{ marginTop: "1rem" }}>
+        {selectedDate ? `Games for ${selectedDate}` : "Today’s MLB Games"}
+      </h2>
 
       {error && <p style={{ color: "red" }}>Error loading games: {error}</p>}
 
       {!error && games === null && <p>Loading games...</p>}
 
       {!error && games !== null && games.length === 0 && (
-        <p>No games scheduled for today.</p>
+        <p>No games found for this date.</p>
       )}
 
       {!error && games !== null && games.length > 0 && (
