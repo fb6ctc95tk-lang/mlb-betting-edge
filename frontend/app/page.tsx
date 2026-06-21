@@ -5,6 +5,7 @@ import { useEffect, useState } from "react";
 import type { CSSProperties } from "react";
 import DataQualityCard from "./components/DataQualityCard";
 import IngestionStatusCard from "./components/IngestionStatusCard";
+import { applyFilters, LINE_MOVE_THRESHOLD } from "../lib/gameFilters";
 
 type Odds = {
   sportsbook: string;
@@ -100,7 +101,6 @@ const cellStyle: CSSProperties = {
   textAlign: "left",
 };
 
-const LINE_MOVE_THRESHOLD = 10;
 const WORKSPACE_STORAGE_KEY = "mlb_workspace_ids";
 
 function FlagBadge({ label, color }: { label: string; color: string }) {
@@ -345,6 +345,8 @@ export default function Home() {
   const [selectedDate, setSelectedDate] = useState<string>("");
   const [availableDates, setAvailableDates] = useState<string[]>([]);
   const [filterHasInjuries, setFilterHasInjuries] = useState(false);
+  const [filterHasLineMovement, setFilterHasLineMovement] = useState(false);
+  const [filterHasWeather, setFilterHasWeather] = useState(false);
   const [sortBy, setSortBy] = useState<"default" | "largest_movement">("default");
   const [workspaceIds, setWorkspaceIds] = useState<Set<number>>(new Set());
   const [compareIdA, setCompareIdA] = useState<number | null>(null);
@@ -406,12 +408,11 @@ export default function Home() {
       });
   }, [selectedDate]);
 
-  let displayedGames: Game[] = games ?? [];
-  if (filterHasInjuries) {
-    displayedGames = displayedGames.filter(
-      (g) => g.away_injuries.length > 0 || g.home_injuries.length > 0
-    );
-  }
+  let displayedGames: Game[] = applyFilters(games ?? [], {
+    hasInjuries: filterHasInjuries,
+    hasLineMovement: filterHasLineMovement,
+    hasWeather: filterHasWeather,
+  });
   if (sortBy === "largest_movement") {
     displayedGames = [...displayedGames].sort((a, b) => {
       const maxA = a.line_movement.length > 0
@@ -473,6 +474,24 @@ export default function Home() {
               style={{ marginRight: "4px" }}
             />
             Has Injuries
+          </label>
+          <label style={{ marginLeft: "1rem" }}>
+            <input
+              type="checkbox"
+              checked={filterHasLineMovement}
+              onChange={(e) => setFilterHasLineMovement(e.target.checked)}
+              style={{ marginRight: "4px" }}
+            />
+            Has Significant Line Movement
+          </label>
+          <label style={{ marginLeft: "1rem" }}>
+            <input
+              type="checkbox"
+              checked={filterHasWeather}
+              onChange={(e) => setFilterHasWeather(e.target.checked)}
+              style={{ marginRight: "4px" }}
+            />
+            Has Weather Context
           </label>
         </div>
         <div>
