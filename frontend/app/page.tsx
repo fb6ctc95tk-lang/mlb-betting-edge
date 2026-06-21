@@ -206,6 +206,8 @@ export default function Home() {
   const [error, setError] = useState<string | null>(null);
   const [selectedDate, setSelectedDate] = useState<string>("");
   const [availableDates, setAvailableDates] = useState<string[]>([]);
+  const [filterHasInjuries, setFilterHasInjuries] = useState(false);
+  const [sortBy, setSortBy] = useState<"default" | "largest_movement">("default");
 
   useEffect(() => {
     const apiUrl = process.env.NEXT_PUBLIC_API_URL;
@@ -237,7 +239,24 @@ export default function Home() {
       });
   }, [selectedDate]);
 
-  const allMovement = games?.flatMap((g) => g.line_movement) ?? [];
+  let displayedGames: Game[] = games ?? [];
+  if (filterHasInjuries) {
+    displayedGames = displayedGames.filter(
+      (g) => g.away_injuries.length > 0 || g.home_injuries.length > 0
+    );
+  }
+  if (sortBy === "largest_movement") {
+    displayedGames = [...displayedGames].sort((a, b) => {
+      const maxA = a.line_movement.length > 0
+        ? Math.max(...a.line_movement.map((m) => Math.abs(m.movement)))
+        : 0;
+      const maxB = b.line_movement.length > 0
+        ? Math.max(...b.line_movement.map((m) => Math.abs(m.movement)))
+        : 0;
+      return maxB - maxA;
+    });
+  }
+  const allMovement = displayedGames.flatMap((g) => g.line_movement);
 
   return (
     <main style={{ padding: "2rem", fontFamily: "Arial, sans-serif" }}>
@@ -273,6 +292,35 @@ export default function Home() {
         )}
       </div>
 
+      <div style={{ marginTop: "1rem", display: "flex", gap: "1.5rem", alignItems: "center", flexWrap: "wrap" }}>
+        <div>
+          <span style={{ fontWeight: "bold", marginRight: "0.5rem" }}>Filter:</span>
+          <label>
+            <input
+              type="checkbox"
+              checked={filterHasInjuries}
+              onChange={(e) => setFilterHasInjuries(e.target.checked)}
+              style={{ marginRight: "4px" }}
+            />
+            Has Injuries
+          </label>
+        </div>
+        <div>
+          <label htmlFor="sort-picker" style={{ fontWeight: "bold", marginRight: "0.5rem" }}>
+            Sort:
+          </label>
+          <select
+            id="sort-picker"
+            value={sortBy}
+            onChange={(e) => setSortBy(e.target.value as "default" | "largest_movement")}
+            style={{ padding: "4px", fontSize: "1rem" }}
+          >
+            <option value="default">Default</option>
+            <option value="largest_movement">Largest Line Movement</option>
+          </select>
+        </div>
+      </div>
+
       <h2 style={{ marginTop: "1rem" }}>
         {selectedDate ? `Games for ${selectedDate}` : "Today’s MLB Games"}
       </h2>
@@ -285,7 +333,11 @@ export default function Home() {
         <p>No games found for this date.</p>
       )}
 
-      {!error && games !== null && games.length > 0 && (
+      {!error && games !== null && games.length > 0 && displayedGames.length === 0 && (
+        <p>No games match the current filter.</p>
+      )}
+
+      {!error && games !== null && displayedGames.length > 0 && (
         <table style={{ borderCollapse: "collapse", width: "100%" }}>
           <thead>
             <tr>
@@ -316,7 +368,7 @@ export default function Home() {
             </tr>
           </thead>
           <tbody>
-            {games.map((game) => {
+            {displayedGames.map((game) => {
               const bet365 = findOdds(game, "Bet365");
               const draftKings = findOdds(game, "DraftKings");
 
