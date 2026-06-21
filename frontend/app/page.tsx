@@ -105,6 +105,7 @@ const cellStyle: CSSProperties = {
 };
 
 const WORKSPACE_STORAGE_KEY = "mlb_workspace_ids";
+const NOTES_STORAGE_KEY = "mlb_workspace_notes";
 
 function findOdds(game: Game, sportsbook: string): Odds | undefined {
   return game.odds.find((o) => o.sportsbook === sportsbook);
@@ -408,12 +409,17 @@ export default function Home() {
   const [workspaceIds, setWorkspaceIds] = useState<Set<number>>(new Set());
   const [compareIdA, setCompareIdA] = useState<number | null>(null);
   const [compareIdB, setCompareIdB] = useState<number | null>(null);
+  const [notes, setNotes] = useState<Record<number, string>>({});
 
   useEffect(() => {
     function loadFromStorage() {
       try {
         const raw = localStorage.getItem(WORKSPACE_STORAGE_KEY);
         if (raw) setWorkspaceIds(new Set(JSON.parse(raw) as number[]));
+      } catch {}
+      try {
+        const raw = localStorage.getItem(NOTES_STORAGE_KEY);
+        if (raw) setNotes(JSON.parse(raw) as Record<number, string>);
       } catch {}
     }
     loadFromStorage();
@@ -423,6 +429,19 @@ export default function Home() {
     setWorkspaceIds((prev) => {
       const next = new Set([...prev, gameId]);
       try { localStorage.setItem(WORKSPACE_STORAGE_KEY, JSON.stringify([...next])); } catch {}
+      return next;
+    });
+  }
+
+  function updateNote(gameId: number, text: string) {
+    setNotes((prev) => {
+      const next = { ...prev };
+      if (text) {
+        next[gameId] = text;
+      } else {
+        delete next[gameId];
+      }
+      try { localStorage.setItem(NOTES_STORAGE_KEY, JSON.stringify(next)); } catch {}
       return next;
     });
   }
@@ -600,18 +619,39 @@ export default function Home() {
           <strong>Research Workspace</strong>
           <div style={{ marginTop: "0.5rem" }}>
             {workspaceGames.map((game) => (
-              <div key={game.game_id} style={{ display: "flex", alignItems: "center", gap: "1rem", padding: "4px 0", borderBottom: "1px solid #eee" }}>
-                <span style={{ fontWeight: "bold", minWidth: "120px" }}>
-                  {game.away_team} @ {game.home_team}
-                </span>
-                <span style={{ color: "#555", fontSize: "0.9em" }}>{game.game_date}</span>
-                <Link href={`/game/${game.game_id}`} style={{ fontSize: "0.85em" }}>View</Link>
-                <button
-                  onClick={() => removeFromWorkspace(game.game_id)}
-                  style={{ padding: "2px 8px", cursor: "pointer", fontSize: "0.85em" }}
-                >
-                  Remove
-                </button>
+              <div key={game.game_id} style={{ padding: "6px 0", borderBottom: "1px solid #eee" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: "1rem" }}>
+                  <span style={{ fontWeight: "bold", minWidth: "120px" }}>
+                    {game.away_team} @ {game.home_team}
+                  </span>
+                  <span style={{ color: "#555", fontSize: "0.9em" }}>{game.game_date}</span>
+                  <Link href={`/game/${game.game_id}`} style={{ fontSize: "0.85em" }}>View</Link>
+                  <button
+                    onClick={() => removeFromWorkspace(game.game_id)}
+                    style={{ padding: "2px 8px", cursor: "pointer", fontSize: "0.85em" }}
+                  >
+                    Remove
+                  </button>
+                </div>
+                <textarea
+                  value={notes[game.game_id] ?? ""}
+                  onChange={(e) => updateNote(game.game_id, e.target.value)}
+                  maxLength={1000}
+                  placeholder="Notes..."
+                  rows={2}
+                  style={{
+                    display: "block",
+                    width: "100%",
+                    marginTop: "4px",
+                    padding: "4px",
+                    fontSize: "0.85em",
+                    fontFamily: "inherit",
+                    border: "1px solid #ddd",
+                    background: "#fff",
+                    resize: "vertical",
+                    boxSizing: "border-box",
+                  }}
+                />
               </div>
             ))}
           </div>
