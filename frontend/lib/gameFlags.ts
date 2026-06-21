@@ -6,7 +6,7 @@ export type GameFlag = {
   color: string;
 };
 
-type FlaggableGame = {
+export type FlaggableGame = {
   away_injuries: unknown[];
   home_injuries: unknown[];
   line_movement: { movement: number }[];

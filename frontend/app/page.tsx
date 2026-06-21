@@ -7,6 +7,8 @@ import DataQualityCard from "./components/DataQualityCard";
 import IngestionStatusCard from "./components/IngestionStatusCard";
 import { applyFilters } from "../lib/gameFilters";
 import { getGameFlags } from "../lib/gameFlags";
+import { getGameFlagSummary } from "../lib/gameFlagSummary";
+import ResearchFlags from "../components/ResearchFlags";
 
 type Odds = {
   sportsbook: string;
@@ -103,24 +105,6 @@ const cellStyle: CSSProperties = {
 };
 
 const WORKSPACE_STORAGE_KEY = "mlb_workspace_ids";
-
-function FlagBadge({ label, color }: { label: string; color: string }) {
-  return (
-    <span style={{
-      display: "inline-block",
-      padding: "2px 6px",
-      fontSize: "0.72em",
-      fontWeight: "bold",
-      color: "#fff",
-      background: color,
-      borderRadius: "3px",
-      marginRight: "4px",
-      whiteSpace: "nowrap",
-    }}>
-      {label}
-    </span>
-  );
-}
 
 function findOdds(game: Game, sportsbook: string): Odds | undefined {
   return game.odds.find((o) => o.sportsbook === sportsbook);
@@ -425,6 +409,7 @@ export default function Home() {
       return maxB - maxA;
     });
   }
+  const flagSummary = getGameFlagSummary(displayedGames);
   const allMovement = displayedGames.flatMap((g) => g.line_movement);
   const workspaceGames = (games ?? []).filter((g) => workspaceIds.has(g.game_id));
   const compareGameA = compareIdA !== null ? (games ?? []).find((g) => g.game_id === compareIdA) ?? null : null;
@@ -510,6 +495,15 @@ export default function Home() {
           </select>
         </div>
       </div>
+
+      {games !== null && (
+        <div style={{ marginTop: "0.75rem", fontSize: "0.88em", color: "#555" }}>
+          <span style={{ fontWeight: "bold", marginRight: "0.75rem" }}>Research Flags:</span>
+          <span style={{ marginRight: "1rem" }}>⚠ Injuries: {flagSummary.injuries}</span>
+          <span style={{ marginRight: "1rem" }}>📈 Movement: {flagSummary.lineMovement}</span>
+          <span>🌬 Weather: {flagSummary.weather}</span>
+        </div>
+      )}
 
       {workspaceGames.length > 0 && (
         <div style={{ marginTop: "1rem", border: "1px solid #999", padding: "0.75rem 1rem", background: "#fafafa" }}>
@@ -639,12 +633,11 @@ export default function Home() {
                     </button>
                   </td>
                   <td style={{ ...cellStyle, whiteSpace: "nowrap" }}>
-                    {flags.length === 0
-                      ? <span style={{ color: "#aaa" }}>—</span>
-                      : flags.map((f) => (
-                          <FlagBadge key={f.label} label={`${f.emoji} ${f.label}`} color={f.color} />
-                        ))
-                    }
+                    <ResearchFlags
+                      flags={flags}
+                      emptyState={<span style={{ color: "#aaa" }}>—</span>}
+                      compact
+                    />
                   </td>
                   <td style={cellStyle}>{game.away_team}</td>
                   <td style={cellStyle}>{game.home_team}</td>
