@@ -410,10 +410,13 @@ export default function Home() {
   const [compareIdB, setCompareIdB] = useState<number | null>(null);
 
   useEffect(() => {
-    try {
-      const raw = localStorage.getItem(WORKSPACE_STORAGE_KEY);
-      if (raw) setWorkspaceIds(new Set(JSON.parse(raw) as number[]));
-    } catch {}
+    function loadFromStorage() {
+      try {
+        const raw = localStorage.getItem(WORKSPACE_STORAGE_KEY);
+        if (raw) setWorkspaceIds(new Set(JSON.parse(raw) as number[]));
+      } catch {}
+    }
+    loadFromStorage();
   }, []);
 
   function addToWorkspace(gameId: number) {
@@ -436,11 +439,14 @@ export default function Home() {
   }
 
   useEffect(() => {
-    const ws = (games ?? []).filter((g) => workspaceIds.has(g.game_id));
-    if (ws.length === 2) {
-      setCompareIdA(ws[0].game_id);
-      setCompareIdB(ws[1].game_id);
+    function autoSelect() {
+      const ws = (games ?? []).filter((g) => workspaceIds.has(g.game_id));
+      if (ws.length === 2) {
+        setCompareIdA(ws[0].game_id);
+        setCompareIdB(ws[1].game_id);
+      }
     }
+    autoSelect();
   }, [games, workspaceIds]);
 
   useEffect(() => {
@@ -457,20 +463,22 @@ export default function Home() {
       ? `${apiUrl}/research/date/${selectedDate}`
       : `${apiUrl}/research/today`;
 
-    setGames(null);
-    setError(null);
-
-    fetch(url)
-      .then((res) => {
-        if (!res.ok) {
-          throw new Error(`Request failed with status ${res.status}`);
-        }
-        return res.json();
-      })
-      .then((data: Game[]) => setGames(data))
-      .catch((err) => {
-        setError(err instanceof Error ? err.message : "Unknown error");
-      });
+    function loadGames() {
+      setGames(null);
+      setError(null);
+      fetch(url)
+        .then((res) => {
+          if (!res.ok) {
+            throw new Error(`Request failed with status ${res.status}`);
+          }
+          return res.json();
+        })
+        .then((data: Game[]) => setGames(data))
+        .catch((err) => {
+          setError(err instanceof Error ? err.message : "Unknown error");
+        });
+    }
+    loadGames();
   }, [selectedDate]);
 
   let displayedGames: Game[] = applyFilters(games ?? [], {
