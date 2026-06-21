@@ -222,6 +222,123 @@ function InjuryCell({ injuries }: { injuries: Injury[] }) {
   );
 }
 
+function compWeather(weather: Weather | null): string {
+  if (!weather) return "—";
+  const parts: string[] = [];
+  if (weather.temperature !== null) parts.push(`${Math.round(weather.temperature)}°F`);
+  if (weather.wind_speed !== null) {
+    const dir = weather.wind_direction !== null ? ` ${degreesToCompass(weather.wind_direction)}` : "";
+    parts.push(`${Math.round(weather.wind_speed)} mph${dir}`);
+  }
+  if (weather.precipitation_chance !== null) parts.push(`${weather.precipitation_chance}% precip`);
+  return parts.length > 0 ? parts.join(", ") : "—";
+}
+
+function compBullpen(bullpen: Bullpen | null): string {
+  if (!bullpen || bullpen.previous_game_date === null) return "—";
+  const ip = bullpen.bullpen_innings_last_game !== null
+    ? bullpen.bullpen_innings_last_game.toFixed(1)
+    : "—";
+  return `${ip} IP (${formatBullpenDate(bullpen.previous_game_date, bullpen.played_yesterday)})`;
+}
+
+function compInjuries(injuries: Injury[]): string {
+  if (injuries.length === 0) return "None";
+  return injuries.map((i) => i.player_name).join(", ");
+}
+
+function compOdds(game: Game, sportsbook: string): string {
+  const o = findOdds(game, sportsbook);
+  if (!o) return "—";
+  return `${formatMoneyline(o.away_moneyline)} / ${formatMoneyline(o.home_moneyline)}`;
+}
+
+function compMaxMove(game: Game): string {
+  if (game.line_movement.length === 0) return "—";
+  const max = Math.max(...game.line_movement.map((m) => Math.abs(m.movement)));
+  return max === 0 ? "0" : `+${Math.round(max)}`;
+}
+
+function ComparisonTable({ a, b }: { a: Game; b: Game }) {
+  const labelCell: CSSProperties = { ...cellStyle, fontWeight: "bold", background: "#f5f5f5", whiteSpace: "nowrap" };
+  const headerCell: CSSProperties = { ...cellStyle, background: "#e8f0fe", fontWeight: "bold", textAlign: "center" };
+  return (
+    <div style={{ marginTop: "1rem", overflowX: "auto" }}>
+      <table style={{ borderCollapse: "collapse", width: "100%" }}>
+        <thead>
+          <tr>
+            <th style={labelCell}></th>
+            <th style={headerCell}>{a.away_team} @ {a.home_team}</th>
+            <th style={headerCell}>{b.away_team} @ {b.home_team}</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td style={labelCell}>Away Record</td>
+            <td style={cellStyle}>{a.away_record ?? "—"}</td>
+            <td style={cellStyle}>{b.away_record ?? "—"}</td>
+          </tr>
+          <tr>
+            <td style={labelCell}>Home Record</td>
+            <td style={cellStyle}>{a.home_record ?? "—"}</td>
+            <td style={cellStyle}>{b.home_record ?? "—"}</td>
+          </tr>
+          <tr>
+            <td style={labelCell}>Away Pitcher</td>
+            <td style={cellStyle}>{a.away_pitcher ?? "TBD"}</td>
+            <td style={cellStyle}>{b.away_pitcher ?? "TBD"}</td>
+          </tr>
+          <tr>
+            <td style={labelCell}>Home Pitcher</td>
+            <td style={cellStyle}>{a.home_pitcher ?? "TBD"}</td>
+            <td style={cellStyle}>{b.home_pitcher ?? "TBD"}</td>
+          </tr>
+          <tr>
+            <td style={labelCell}>Weather</td>
+            <td style={cellStyle}>{compWeather(a.weather)}</td>
+            <td style={cellStyle}>{compWeather(b.weather)}</td>
+          </tr>
+          <tr>
+            <td style={labelCell}>Away Bullpen</td>
+            <td style={cellStyle}>{compBullpen(a.away_bullpen)}</td>
+            <td style={cellStyle}>{compBullpen(b.away_bullpen)}</td>
+          </tr>
+          <tr>
+            <td style={labelCell}>Home Bullpen</td>
+            <td style={cellStyle}>{compBullpen(a.home_bullpen)}</td>
+            <td style={cellStyle}>{compBullpen(b.home_bullpen)}</td>
+          </tr>
+          <tr>
+            <td style={labelCell}>Away Injuries</td>
+            <td style={cellStyle}>{compInjuries(a.away_injuries)}</td>
+            <td style={cellStyle}>{compInjuries(b.away_injuries)}</td>
+          </tr>
+          <tr>
+            <td style={labelCell}>Home Injuries</td>
+            <td style={cellStyle}>{compInjuries(a.home_injuries)}</td>
+            <td style={cellStyle}>{compInjuries(b.home_injuries)}</td>
+          </tr>
+          <tr>
+            <td style={labelCell}>Bet365 (Away / Home)</td>
+            <td style={cellStyle}>{compOdds(a, "Bet365")}</td>
+            <td style={cellStyle}>{compOdds(b, "Bet365")}</td>
+          </tr>
+          <tr>
+            <td style={labelCell}>DraftKings (Away / Home)</td>
+            <td style={cellStyle}>{compOdds(a, "DraftKings")}</td>
+            <td style={cellStyle}>{compOdds(b, "DraftKings")}</td>
+          </tr>
+          <tr>
+            <td style={labelCell}>Max Line Move</td>
+            <td style={cellStyle}>{compMaxMove(a)}</td>
+            <td style={cellStyle}>{compMaxMove(b)}</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 export default function Home() {
   const [games, setGames] = useState<Game[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -230,6 +347,8 @@ export default function Home() {
   const [filterHasInjuries, setFilterHasInjuries] = useState(false);
   const [sortBy, setSortBy] = useState<"default" | "largest_movement">("default");
   const [workspaceIds, setWorkspaceIds] = useState<Set<number>>(new Set());
+  const [compareIdA, setCompareIdA] = useState<number | null>(null);
+  const [compareIdB, setCompareIdB] = useState<number | null>(null);
 
   useEffect(() => {
     try {
@@ -253,6 +372,8 @@ export default function Home() {
       try { localStorage.setItem(WORKSPACE_STORAGE_KEY, JSON.stringify([...next])); } catch {}
       return next;
     });
+    setCompareIdA((prev) => (prev === gameId ? null : prev));
+    setCompareIdB((prev) => (prev === gameId ? null : prev));
   }
 
   useEffect(() => {
@@ -304,6 +425,8 @@ export default function Home() {
   }
   const allMovement = displayedGames.flatMap((g) => g.line_movement);
   const workspaceGames = (games ?? []).filter((g) => workspaceIds.has(g.game_id));
+  const compareGameA = compareIdA !== null ? (games ?? []).find((g) => g.game_id === compareIdA) ?? null : null;
+  const compareGameB = compareIdB !== null ? (games ?? []).find((g) => g.game_id === compareIdB) ?? null : null;
 
   return (
     <main style={{ padding: "2rem", fontFamily: "Arial, sans-serif" }}>
@@ -388,6 +511,39 @@ export default function Home() {
               </div>
             ))}
           </div>
+          {workspaceGames.length >= 2 && (
+            <div style={{ marginTop: "0.75rem", borderTop: "1px solid #ddd", paddingTop: "0.75rem" }}>
+              <span style={{ fontWeight: "bold", marginRight: "0.75rem" }}>Compare:</span>
+              <select
+                value={compareIdA ?? ""}
+                onChange={(e) => setCompareIdA(e.target.value ? Number(e.target.value) : null)}
+                style={{ padding: "3px", marginRight: "0.5rem" }}
+              >
+                <option value="">— Game A —</option>
+                {workspaceGames.map((g) => (
+                  <option key={g.game_id} value={g.game_id}>
+                    {g.away_team} @ {g.home_team}
+                  </option>
+                ))}
+              </select>
+              <span style={{ marginRight: "0.5rem" }}>vs</span>
+              <select
+                value={compareIdB ?? ""}
+                onChange={(e) => setCompareIdB(e.target.value ? Number(e.target.value) : null)}
+                style={{ padding: "3px" }}
+              >
+                <option value="">— Game B —</option>
+                {workspaceGames.map((g) => (
+                  <option key={g.game_id} value={g.game_id}>
+                    {g.away_team} @ {g.home_team}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+          {compareGameA && compareGameB && (
+            <ComparisonTable a={compareGameA} b={compareGameB} />
+          )}
         </div>
       )}
 
