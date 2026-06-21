@@ -494,16 +494,18 @@ export default function Home() {
             <option value="largest_movement">Largest Line Movement</option>
           </select>
         </div>
-      </div>
-
-      {games !== null && (
-        <div style={{ marginTop: "0.75rem", fontSize: "0.88em", color: "#555" }}>
-          <span style={{ fontWeight: "bold", marginRight: "0.75rem" }}>Research Flags:</span>
-          <span style={{ marginRight: "1rem" }}>⚠ Injuries: {flagSummary.injuries}</span>
-          <span style={{ marginRight: "1rem" }}>📈 Movement: {flagSummary.lineMovement}</span>
-          <span>🌬 Weather: {flagSummary.weather}</span>
+        {games !== null && (
+          <div style={{ fontSize: "0.88em", color: "#555", borderLeft: "1px solid #ddd", paddingLeft: "1.5rem" }}>
+            <span style={{ fontWeight: "bold", marginRight: "0.75rem" }}>Flags:</span>
+            <span style={{ marginRight: "0.75rem" }}>⚠ {flagSummary.injuries}</span>
+            <span style={{ marginRight: "0.75rem" }}>📈 {flagSummary.lineMovement}</span>
+            <span>🌬 {flagSummary.weather}</span>
+          </div>
+        )}
+        <div style={{ marginLeft: "auto" }}>
+          <span style={{ fontWeight: "bold" }}>Workspace ({workspaceIds.size})</span>
         </div>
-      )}
+      </div>
 
       {workspaceGames.length > 0 && (
         <div style={{ marginTop: "1rem", border: "1px solid #999", padding: "0.75rem 1rem", background: "#fafafa" }}>
@@ -639,8 +641,8 @@ export default function Home() {
                       compact
                     />
                   </td>
-                  <td style={cellStyle}>{game.away_team}</td>
-                  <td style={cellStyle}>{game.home_team}</td>
+                  <td style={{ ...cellStyle, fontWeight: "600" }}>{game.away_team}</td>
+                  <td style={{ ...cellStyle, fontWeight: "600" }}>{game.home_team}</td>
                   <td style={cellStyle}>
                     {game.game_time ? `${game.game_time} UTC` : "TBD"}
                   </td>
