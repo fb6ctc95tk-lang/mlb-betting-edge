@@ -101,6 +101,7 @@ const cellStyle: CSSProperties = {
 };
 
 const LINE_MOVE_THRESHOLD = 10;
+const WORKSPACE_STORAGE_KEY = "mlb_workspace_ids";
 
 function FlagBadge({ label, color }: { label: string; color: string }) {
   return (
@@ -228,6 +229,31 @@ export default function Home() {
   const [availableDates, setAvailableDates] = useState<string[]>([]);
   const [filterHasInjuries, setFilterHasInjuries] = useState(false);
   const [sortBy, setSortBy] = useState<"default" | "largest_movement">("default");
+  const [workspaceIds, setWorkspaceIds] = useState<Set<number>>(new Set());
+
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(WORKSPACE_STORAGE_KEY);
+      if (raw) setWorkspaceIds(new Set(JSON.parse(raw) as number[]));
+    } catch {}
+  }, []);
+
+  function addToWorkspace(gameId: number) {
+    setWorkspaceIds((prev) => {
+      const next = new Set([...prev, gameId]);
+      try { localStorage.setItem(WORKSPACE_STORAGE_KEY, JSON.stringify([...next])); } catch {}
+      return next;
+    });
+  }
+
+  function removeFromWorkspace(gameId: number) {
+    setWorkspaceIds((prev) => {
+      const next = new Set(prev);
+      next.delete(gameId);
+      try { localStorage.setItem(WORKSPACE_STORAGE_KEY, JSON.stringify([...next])); } catch {}
+      return next;
+    });
+  }
 
   useEffect(() => {
     const apiUrl = process.env.NEXT_PUBLIC_API_URL;
@@ -277,6 +303,7 @@ export default function Home() {
     });
   }
   const allMovement = displayedGames.flatMap((g) => g.line_movement);
+  const workspaceGames = (games ?? []).filter((g) => workspaceIds.has(g.game_id));
 
   return (
     <main style={{ padding: "2rem", fontFamily: "Arial, sans-serif" }}>
@@ -341,6 +368,29 @@ export default function Home() {
         </div>
       </div>
 
+      {workspaceGames.length > 0 && (
+        <div style={{ marginTop: "1rem", border: "1px solid #999", padding: "0.75rem 1rem", background: "#fafafa" }}>
+          <strong>Research Workspace</strong>
+          <div style={{ marginTop: "0.5rem" }}>
+            {workspaceGames.map((game) => (
+              <div key={game.game_id} style={{ display: "flex", alignItems: "center", gap: "1rem", padding: "4px 0", borderBottom: "1px solid #eee" }}>
+                <span style={{ fontWeight: "bold", minWidth: "120px" }}>
+                  {game.away_team} @ {game.home_team}
+                </span>
+                <span style={{ color: "#555", fontSize: "0.9em" }}>{game.game_date}</span>
+                <Link href={`/game/${game.game_id}`} style={{ fontSize: "0.85em" }}>View</Link>
+                <button
+                  onClick={() => removeFromWorkspace(game.game_id)}
+                  style={{ padding: "2px 8px", cursor: "pointer", fontSize: "0.85em" }}
+                >
+                  Remove
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       <h2 style={{ marginTop: "1rem" }}>
         {selectedDate ? `Games for ${selectedDate}` : "Today’s MLB Games"}
       </h2>
@@ -400,8 +450,21 @@ export default function Home() {
 
               return (
                 <tr key={game.game_id}>
-                  <td style={cellStyle}>
+                  <td style={{ ...cellStyle, whiteSpace: "nowrap" }}>
                     <Link href={`/game/${game.game_id}`}>View</Link>
+                    <br />
+                    <button
+                      onClick={() => addToWorkspace(game.game_id)}
+                      style={{
+                        marginTop: "4px",
+                        padding: "2px 6px",
+                        cursor: "pointer",
+                        fontSize: "0.82em",
+                        background: workspaceIds.has(game.game_id) ? "#e8f5e9" : undefined,
+                      }}
+                    >
+                      {workspaceIds.has(game.game_id) ? "✓ Workspace" : "+ Workspace"}
+                    </button>
                   </td>
                   <td style={{ ...cellStyle, whiteSpace: "nowrap" }}>
                     {hasInjuries && <FlagBadge label="INJURIES" color="crimson" />}
