@@ -100,6 +100,26 @@ const cellStyle: CSSProperties = {
   textAlign: "left",
 };
 
+const LINE_MOVE_THRESHOLD = 10;
+
+function FlagBadge({ label, color }: { label: string; color: string }) {
+  return (
+    <span style={{
+      display: "inline-block",
+      padding: "2px 6px",
+      fontSize: "0.72em",
+      fontWeight: "bold",
+      color: "#fff",
+      background: color,
+      borderRadius: "3px",
+      marginRight: "4px",
+      whiteSpace: "nowrap",
+    }}>
+      {label}
+    </span>
+  );
+}
+
 function findOdds(game: Game, sportsbook: string): Odds | undefined {
   return game.odds.find((o) => o.sportsbook === sportsbook);
 }
@@ -342,6 +362,7 @@ export default function Home() {
           <thead>
             <tr>
               <th style={cellStyle}>Detail</th>
+              <th style={cellStyle}>Flags</th>
               <th style={cellStyle}>Away Team</th>
               <th style={cellStyle}>Home Team</th>
               <th style={cellStyle}>Game Time</th>
@@ -371,11 +392,20 @@ export default function Home() {
             {displayedGames.map((game) => {
               const bet365 = findOdds(game, "Bet365");
               const draftKings = findOdds(game, "DraftKings");
+              const hasInjuries = game.away_injuries.length > 0 || game.home_injuries.length > 0;
+              const maxMove = game.line_movement.length > 0
+                ? Math.max(...game.line_movement.map((m) => Math.abs(m.movement)))
+                : 0;
+              const hasLineMoves = maxMove > LINE_MOVE_THRESHOLD;
 
               return (
                 <tr key={game.game_id}>
                   <td style={cellStyle}>
                     <Link href={`/game/${game.game_id}`}>View</Link>
+                  </td>
+                  <td style={{ ...cellStyle, whiteSpace: "nowrap" }}>
+                    {hasInjuries && <FlagBadge label="INJURIES" color="crimson" />}
+                    {hasLineMoves && <FlagBadge label="LINE MOVE" color="#1a56a0" />}
                   </td>
                   <td style={cellStyle}>{game.away_team}</td>
                   <td style={cellStyle}>{game.home_team}</td>
