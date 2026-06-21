@@ -75,6 +75,36 @@ def _get_research_for_date(conn, target_date):
 
     cur.execute(
         """
+        SELECT team_id, player_name, injury_status, injury_description
+        FROM team_injuries
+        ORDER BY team_id, player_name
+        """
+    )
+    injury_rows = cur.fetchall()
+
+    cur.execute(
+        """
+        SELECT team_id, previous_game_date, bullpen_innings_last_game, played_yesterday
+        FROM team_bullpen_context
+        WHERE reference_date = %s
+        """,
+        (target_date,),
+    )
+    bullpen_rows = cur.fetchall()
+
+    cur.execute(
+        """
+        SELECT gw.game_id, gw.temperature, gw.wind_speed, gw.wind_direction, gw.precipitation_chance
+        FROM game_weather gw
+        JOIN games g ON g.id = gw.game_id
+        WHERE g.game_date = %s
+        """,
+        (target_date,),
+    )
+    weather_rows = cur.fetchall()
+
+    cur.execute(
+        """
         WITH opening AS (
             SELECT DISTINCT ON (game_id, sportsbook) *
             FROM odds_history
@@ -109,6 +139,33 @@ def _get_research_for_date(conn, target_date):
     movement_rows = cur.fetchall()
 
     cur.close()
+
+    injuries_by_team_id: dict = {}
+    for team_id, player_name, status, description in injury_rows:
+        injuries_by_team_id.setdefault(team_id, []).append({
+            "player_name": player_name,
+            "injury_status": status,
+            "injury_description": description,
+        })
+
+    bullpen_by_team_id = {
+        team_id: {
+            "previous_game_date": prev_date.isoformat() if prev_date else None,
+            "bullpen_innings_last_game": float(innings) if innings is not None else None,
+            "played_yesterday": played_yesterday,
+        }
+        for team_id, prev_date, innings, played_yesterday in bullpen_rows
+    }
+
+    weather_by_game = {
+        game_id: {
+            "temperature": float(temperature) if temperature is not None else None,
+            "wind_speed": float(wind_speed) if wind_speed is not None else None,
+            "wind_direction": wind_direction,
+            "precipitation_chance": precipitation_chance,
+        }
+        for game_id, temperature, wind_speed, wind_direction, precipitation_chance in weather_rows
+    }
 
     unique_team_ids = {row[8] for row in game_rows} | {row[9] for row in game_rows}
     form_by_team_id = {
@@ -209,6 +266,11 @@ def _get_research_for_date(conn, target_date):
             } if home_team_id in splits_by_team_id else None,
             "odds": odds_by_game.get(game_id, []),
             "line_movement": movement_by_game.get(game_id, []),
+            "weather": weather_by_game.get(game_id),
+            "away_injuries": injuries_by_team_id.get(away_team_id, []),
+            "home_injuries": injuries_by_team_id.get(home_team_id, []),
+            "away_bullpen": bullpen_by_team_id.get(away_team_id),
+            "home_bullpen": bullpen_by_team_id.get(home_team_id),
         })
 
     return games

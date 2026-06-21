@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import type { CSSProperties } from "react";
+import IngestionStatusCard from "./components/IngestionStatusCard";
 
 type Odds = {
   sportsbook: string;
@@ -46,6 +47,25 @@ type TeamSplits = {
   home_losses?: number;
 };
 
+type Injury = {
+  player_name: string;
+  injury_status: string | null;
+  injury_description: string | null;
+};
+
+type Bullpen = {
+  previous_game_date: string | null;
+  bullpen_innings_last_game: number | null;
+  played_yesterday: boolean;
+};
+
+type Weather = {
+  temperature: number | null;
+  wind_speed: number | null;
+  wind_direction: number | null;
+  precipitation_chance: number | null;
+};
+
 type Game = {
   game_id: number;
   game_date: string;
@@ -65,6 +85,11 @@ type Game = {
   home_team_splits: TeamSplits | null;
   odds: Odds[];
   line_movement: Movement[];
+  weather: Weather | null;
+  away_injuries: Injury[];
+  home_injuries: Injury[];
+  away_bullpen: Bullpen | null;
+  home_bullpen: Bullpen | null;
 };
 
 const cellStyle: CSSProperties = {
@@ -109,6 +134,71 @@ function formatTeamForm(form: TeamForm | null): string {
   return `${label}: ${form.last_10_record}, Run Diff: ${sign}${form.last_10_run_diff}`;
 }
 
+function degreesToCompass(deg: number): string {
+  const dirs = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"];
+  return dirs[Math.round(deg / 45) % 8];
+}
+
+function WeatherCell({ weather }: { weather: Weather | null }) {
+  if (!weather) {
+    return <span style={{ color: "#888" }}>Weather unavailable</span>;
+  }
+  const lines: string[] = [];
+  if (weather.temperature !== null) lines.push(`${Math.round(weather.temperature)}°F`);
+  if (weather.wind_speed !== null) {
+    const dir = weather.wind_direction !== null ? ` ${degreesToCompass(weather.wind_direction)}` : "";
+    lines.push(`${Math.round(weather.wind_speed)} mph${dir}`);
+  }
+  if (weather.precipitation_chance !== null) lines.push(`${weather.precipitation_chance}% precip`);
+  if (lines.length === 0) return <span style={{ color: "#888" }}>Weather unavailable</span>;
+  return <>{lines.map((l, i) => <div key={i}>{l}</div>)}</>;
+}
+
+function formatBullpenDate(dateStr: string, playedYesterday: boolean): string {
+  const d = new Date(`${dateStr}T12:00:00`);
+  const label = d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+  return playedYesterday ? `${label} (yesterday)` : label;
+}
+
+function BullpenCell({ bullpen }: { bullpen: Bullpen | null }) {
+  if (!bullpen || bullpen.previous_game_date === null) {
+    return <span style={{ color: "#888" }}>-</span>;
+  }
+  const ip = bullpen.bullpen_innings_last_game !== null
+    ? bullpen.bullpen_innings_last_game.toFixed(1)
+    : "-";
+  const dateLabel = formatBullpenDate(bullpen.previous_game_date, bullpen.played_yesterday);
+  return (
+    <>
+      <div>{ip} IP</div>
+      <div style={{ fontSize: "0.85em", color: bullpen.played_yesterday ? "crimson" : "#555" }}>
+        {dateLabel}
+      </div>
+    </>
+  );
+}
+
+function InjuryCell({ injuries }: { injuries: Injury[] }) {
+  if (!injuries || injuries.length === 0) {
+    return <span style={{ color: "#888" }}>-</span>;
+  }
+  return (
+    <>
+      {injuries.map((inj, i) => (
+        <div key={i} style={{ marginBottom: i < injuries.length - 1 ? "6px" : 0 }}>
+          <div style={{ fontWeight: "bold", fontSize: "0.85em" }}>{inj.player_name}</div>
+          {inj.injury_status && (
+            <div style={{ fontSize: "0.8em", color: "crimson" }}>{inj.injury_status}</div>
+          )}
+          {inj.injury_description && (
+            <div style={{ fontSize: "0.8em", color: "#555" }}>{inj.injury_description}</div>
+          )}
+        </div>
+      ))}
+    </>
+  );
+}
+
 export default function Home() {
   const [games, setGames] = useState<Game[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -150,6 +240,8 @@ export default function Home() {
   return (
     <main style={{ padding: "2rem", fontFamily: "Arial, sans-serif" }}>
       <h1>MLB Betting Edge</h1>
+
+      <IngestionStatusCard />
 
       <div style={{ marginTop: "1.5rem" }}>
         <label htmlFor="date-picker" style={{ marginRight: "0.5rem", fontWeight: "bold" }}>
@@ -210,6 +302,11 @@ export default function Home() {
               <th style={cellStyle}>Bet365 Implied Prob (Away / Home)</th>
               <th style={cellStyle}>DraftKings Moneyline (Away / Home)</th>
               <th style={cellStyle}>DraftKings Implied Prob (Away / Home)</th>
+              <th style={cellStyle}>Weather</th>
+              <th style={cellStyle}>Away Injuries</th>
+              <th style={cellStyle}>Home Injuries</th>
+              <th style={cellStyle}>Away Bullpen (Last Game)</th>
+              <th style={cellStyle}>Home Bullpen (Last Game)</th>
             </tr>
           </thead>
           <tbody>
@@ -254,6 +351,21 @@ export default function Home() {
                     {draftKings
                       ? `${formatProbability(draftKings.away_implied_probability)} / ${formatProbability(draftKings.home_implied_probability)}`
                       : "-"}
+                  </td>
+                  <td style={cellStyle}>
+                    <WeatherCell weather={game.weather} />
+                  </td>
+                  <td style={cellStyle}>
+                    <InjuryCell injuries={game.away_injuries} />
+                  </td>
+                  <td style={cellStyle}>
+                    <InjuryCell injuries={game.home_injuries} />
+                  </td>
+                  <td style={cellStyle}>
+                    <BullpenCell bullpen={game.away_bullpen} />
+                  </td>
+                  <td style={cellStyle}>
+                    <BullpenCell bullpen={game.home_bullpen} />
                   </td>
                 </tr>
               );

@@ -10,15 +10,17 @@ Run from the repo root:
 import argparse
 import os
 import sys
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 import psycopg2
 from dotenv import load_dotenv
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+from fetchers import injuries as injuries_fetcher
 from fetchers import mlb_stats_api
 from fetchers import odds_api_io
+from fetchers import weather as weather_fetcher
 
 load_dotenv()
 
@@ -235,6 +237,138 @@ def find_matching_game(saved_games, odds_record):
     return best_match
 
 
+def save_injuries(cur, injury_records):
+    """Clear the injuries table and insert current records from ESPN."""
+    cur.execute("DELETE FROM team_injuries")
+
+    saved = 0
+    skipped = 0
+
+    for inj in injury_records:
+        cur.execute("SELECT id FROM teams WHERE abbreviation = %s", (inj["team_abbreviation"],))
+        row = cur.fetchone()
+        if not row:
+            skipped += 1
+            continue
+
+        cur.execute(
+            """
+            INSERT INTO team_injuries (team_id, player_name, injury_status, injury_description)
+            VALUES (%s, %s, %s, %s)
+            """,
+            (row[0], inj["player_name"], inj["injury_status"], inj["injury_description"]),
+        )
+        saved += 1
+
+    return saved, skipped
+
+
+def save_bullpen_context(cur, saved_games, target_date):
+    """
+    For each team in today's games, find their most recent final game, fetch
+    the boxscore, calculate bullpen innings, and upsert into team_bullpen_context.
+    """
+    today = date.fromisoformat(target_date) if target_date else date.today()
+    yesterday = today - timedelta(days=1)
+
+    unique_abbrs = {g["home_team"] for g in saved_games} | {g["away_team"] for g in saved_games}
+    unique_abbrs.discard(None)
+
+    saved = 0
+    skipped = 0
+
+    for abbr in unique_abbrs:
+        cur.execute("SELECT id FROM teams WHERE abbreviation = %s", (abbr,))
+        row = cur.fetchone()
+        if not row:
+            skipped += 1
+            continue
+        team_id = row[0]
+
+        cur.execute(
+            """
+            SELECT external_game_id, game_date,
+                   CASE WHEN home_team_id = %s THEN 'home' ELSE 'away' END AS side
+            FROM games
+            WHERE (home_team_id = %s OR away_team_id = %s)
+              AND status = 'final'
+              AND game_date < %s
+            ORDER BY game_date DESC
+            LIMIT 1
+            """,
+            (team_id, team_id, team_id, today),
+        )
+        prev = cur.fetchone()
+        if not prev:
+            skipped += 1
+            continue
+
+        game_pk, prev_date, side = prev
+        played_yesterday = (prev_date == yesterday)
+
+        try:
+            bullpen_ip = mlb_stats_api.get_bullpen_innings(game_pk, side)
+        except Exception as e:
+            print(f"  Bullpen fetch failed for {abbr}: {e}")
+            skipped += 1
+            continue
+
+        cur.execute(
+            """
+            INSERT INTO team_bullpen_context
+                (team_id, reference_date, previous_game_date, bullpen_innings_last_game, played_yesterday)
+            VALUES (%s, %s, %s, %s, %s)
+            ON CONFLICT (team_id, reference_date) DO UPDATE SET
+                previous_game_date        = EXCLUDED.previous_game_date,
+                bullpen_innings_last_game = EXCLUDED.bullpen_innings_last_game,
+                played_yesterday          = EXCLUDED.played_yesterday,
+                updated_at                = NOW()
+            """,
+            (team_id, today, prev_date, bullpen_ip, played_yesterday),
+        )
+        saved += 1
+
+    return saved, skipped
+
+
+def save_weather(cur, saved_games):
+    """Fetch and upsert current weather for each game's home stadium."""
+    saved = 0
+    skipped = 0
+
+    for game in saved_games:
+        home_team = game["home_team"]
+        coords = weather_fetcher.STADIUM_COORDS.get(home_team)
+        if not coords:
+            skipped += 1
+            continue
+
+        lat, lon = coords
+        try:
+            w = weather_fetcher.get_weather(lat, lon)
+        except Exception as e:
+            print(f"  Weather fetch failed for {home_team}: {e}")
+            skipped += 1
+            continue
+
+        cur.execute(
+            """
+            INSERT INTO game_weather (game_id, temperature, wind_speed, wind_direction, precipitation_chance, updated_at)
+            VALUES (%s, %s, %s, %s, %s, NOW())
+            ON CONFLICT (game_id) DO UPDATE SET
+                temperature          = EXCLUDED.temperature,
+                wind_speed           = EXCLUDED.wind_speed,
+                wind_direction       = EXCLUDED.wind_direction,
+                precipitation_chance = EXCLUDED.precipitation_chance,
+                updated_at           = NOW()
+            """,
+            (game["id"], w["temperature"], w["wind_speed"], w["wind_direction"], w["precipitation_chance"]),
+        )
+        saved += 1
+
+    return saved, skipped
+
+
 def save_odds(cur, saved_games, odds_records):
     """Insert one odds_history row per odds record that matches a saved game."""
     saved = 0
@@ -296,6 +430,17 @@ def main():
         print(f"  Skipping odds: {e}")
         odds_records = []
 
+    print("Fetching injury data from ESPN...")
+    try:
+        injury_records = injuries_fetcher.get_mlb_injuries()
+        print(f"  Found {len(injury_records)} injury records")
+    except Exception as e:
+        print(f"  Skipping injuries: {e}")
+        injury_records = []
+
+    print("Fetching bullpen context from MLB Stats API...")
+    print("Fetching weather from Open-Meteo...")
+
     try:
         conn = psycopg2.connect(DATABASE_URL)
     except Exception as e:
@@ -308,6 +453,9 @@ def main():
     pitchers_saved, games_with_pitchers = save_starting_pitchers(cur, saved_games)
     records_saved = save_team_records(cur, team_records)
     odds_saved, odds_skipped = save_odds(cur, saved_games, odds_records)
+    injuries_saved, injuries_skipped = save_injuries(cur, injury_records)
+    bullpen_saved, bullpen_skipped = save_bullpen_context(cur, saved_games, target_date)
+    weather_saved, weather_skipped = save_weather(cur, saved_games)
 
     conn.commit()
     cur.close()
@@ -321,6 +469,18 @@ def main():
         print(f"Saved {odds_saved} odds rows ({odds_skipped} skipped - no matching game today)")
     else:
         print(f"Saved {odds_saved} odds rows")
+    if injuries_skipped:
+        print(f"Saved {injuries_saved} injury rows ({injuries_skipped} skipped - unknown team)")
+    else:
+        print(f"Saved {injuries_saved} injury rows")
+    if bullpen_skipped:
+        print(f"Saved {bullpen_saved} bullpen context rows ({bullpen_skipped} skipped)")
+    else:
+        print(f"Saved {bullpen_saved} bullpen context rows")
+    if weather_skipped:
+        print(f"Saved {weather_saved} weather rows ({weather_skipped} skipped)")
+    else:
+        print(f"Saved {weather_saved} weather rows")
 
 
 if __name__ == "__main__":

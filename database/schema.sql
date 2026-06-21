@@ -83,6 +83,65 @@ CREATE INDEX idx_odds_history_game_time
 
 
 -- -------------------------------------------------------------
+-- TABLE 6: game_weather
+-- One row per game. Upserted on each ingestion run.
+-- Weather is fetched from Open-Meteo using the home team's
+-- stadium coordinates.
+-- -------------------------------------------------------------
+CREATE TABLE game_weather (
+    id                      SERIAL PRIMARY KEY,
+    game_id                 INTEGER         NOT NULL REFERENCES games(id),
+    temperature             NUMERIC(5, 1),      -- °F
+    wind_speed              NUMERIC(5, 1),      -- mph
+    wind_direction          INTEGER,            -- degrees (0–360)
+    precipitation_chance    INTEGER,            -- % (0–100)
+    updated_at              TIMESTAMPTZ     NOT NULL DEFAULT NOW(),
+
+    UNIQUE (game_id)
+);
+
+
+-- -------------------------------------------------------------
+-- TABLE 7: team_bullpen_context
+-- One row per team per game date. Upserted on each ingestion run.
+-- Captures bullpen usage from the team's previous completed game
+-- so it can be surfaced as context in the research view.
+-- bullpen_innings_last_game uses baseball IP notation:
+--   3.1 means 3 full innings + 1 out (not 3.1 decimal innings).
+-- -------------------------------------------------------------
+CREATE TABLE team_bullpen_context (
+    id                          SERIAL PRIMARY KEY,
+    team_id                     INTEGER     NOT NULL REFERENCES teams(id),
+    reference_date              DATE        NOT NULL,
+    previous_game_date          DATE,
+    bullpen_innings_last_game   NUMERIC(5, 1),
+    played_yesterday            BOOLEAN,
+    updated_at                  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+    UNIQUE (team_id, reference_date)
+);
+
+
+-- -------------------------------------------------------------
+-- TABLE 8: team_injuries
+-- Cleared and repopulated on every ingestion run.
+-- Holds current injury status only — no history is kept.
+-- Source: ESPN unofficial API.
+-- -------------------------------------------------------------
+CREATE TABLE team_injuries (
+    id                  SERIAL PRIMARY KEY,
+    team_id             INTEGER     NOT NULL REFERENCES teams(id),
+    player_name         VARCHAR(100) NOT NULL,
+    injury_status       VARCHAR(50),
+    injury_description  TEXT,
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_team_injuries_team
+    ON team_injuries (team_id);
+
+
+-- -------------------------------------------------------------
 -- TABLE 5: team_records
 -- One row per team per season. Updated daily.
 -- Tracks overall, home, and away win/loss records.
