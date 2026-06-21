@@ -34,3 +34,6 @@ Thumbs.db
 .vscode/
 .idea/
 *.swp
+# ----- RUNTIME LOGS -----
+logs/
+*.log
