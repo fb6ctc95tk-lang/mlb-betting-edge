@@ -276,6 +276,219 @@ def _get_research_for_date(conn, target_date):
     return games
 
 
+def _get_research_for_game(conn, game_id):
+    cur = conn.cursor()
+
+    cur.execute(
+        """
+        SELECT
+            g.id, g.game_date, g.game_time,
+            at.abbreviation AS away_team,
+            ht.abbreviation AS home_team,
+            g.status,
+            sp.away_pitcher, sp.home_pitcher,
+            g.away_team_id, g.home_team_id
+        FROM games g
+        JOIN teams ht ON ht.id = g.home_team_id
+        JOIN teams at ON at.id = g.away_team_id
+        LEFT JOIN starting_pitchers sp ON sp.game_id = g.id
+        WHERE g.id = %s
+        """,
+        (game_id,),
+    )
+    row = cur.fetchone()
+    if not row:
+        cur.close()
+        return None
+
+    (
+        gid, game_date, game_time, away_team, home_team, status,
+        away_pitcher, home_pitcher, away_team_id, home_team_id,
+    ) = row
+
+    cur.execute(
+        """
+        SELECT DISTINCT ON (team_id) team_id, wins, losses
+        FROM team_records
+        WHERE team_id IN (%s, %s)
+        ORDER BY team_id, season DESC
+        """,
+        (away_team_id, home_team_id),
+    )
+    record_rows = cur.fetchall()
+
+    cur.execute(
+        """
+        SELECT DISTINCT ON (sportsbook) sportsbook, away_moneyline, home_moneyline
+        FROM odds_history
+        WHERE game_id = %s
+        ORDER BY sportsbook, recorded_at DESC
+        """,
+        (gid,),
+    )
+    odds_rows = cur.fetchall()
+
+    cur.execute(
+        "SELECT temperature, wind_speed, wind_direction, precipitation_chance FROM game_weather WHERE game_id = %s",
+        (gid,),
+    )
+    weather_row = cur.fetchone()
+
+    cur.execute(
+        """
+        SELECT team_id, player_name, injury_status, injury_description
+        FROM team_injuries
+        WHERE team_id IN (%s, %s)
+        ORDER BY player_name
+        """,
+        (away_team_id, home_team_id),
+    )
+    injury_rows = cur.fetchall()
+
+    cur.execute(
+        """
+        SELECT team_id, previous_game_date, bullpen_innings_last_game, played_yesterday
+        FROM team_bullpen_context
+        WHERE team_id IN (%s, %s) AND reference_date = %s
+        """,
+        (away_team_id, home_team_id, game_date),
+    )
+    bullpen_rows = cur.fetchall()
+
+    cur.execute(
+        """
+        WITH opening AS (
+            SELECT DISTINCT ON (sportsbook) sportsbook, home_moneyline, away_moneyline, recorded_at
+            FROM odds_history
+            WHERE game_id = %s
+            ORDER BY sportsbook, recorded_at ASC
+        ),
+        latest AS (
+            SELECT DISTINCT ON (sportsbook) sportsbook, home_moneyline, away_moneyline, recorded_at
+            FROM odds_history
+            WHERE game_id = %s
+            ORDER BY sportsbook, recorded_at DESC
+        )
+        SELECT op.sportsbook,
+               op.home_moneyline, op.away_moneyline, op.recorded_at,
+               la.home_moneyline, la.away_moneyline, la.recorded_at
+        FROM opening op
+        JOIN latest la ON la.sportsbook = op.sportsbook
+        ORDER BY op.sportsbook
+        """,
+        (gid, gid),
+    )
+    movement_rows = cur.fetchall()
+
+    cur.close()
+
+    record_by_team_id = {tid: f"{w}-{l}" for tid, w, l in record_rows}
+
+    odds = [
+        {
+            "sportsbook": sb,
+            "away_moneyline": away_ml,
+            "away_implied_probability": american_odds_to_implied_probability(away_ml),
+            "home_moneyline": home_ml,
+            "home_implied_probability": american_odds_to_implied_probability(home_ml),
+        }
+        for sb, away_ml, home_ml in odds_rows
+    ]
+
+    weather = None
+    if weather_row:
+        temperature, wind_speed, wind_direction, precipitation_chance = weather_row
+        weather = {
+            "temperature": float(temperature) if temperature is not None else None,
+            "wind_speed": float(wind_speed) if wind_speed is not None else None,
+            "wind_direction": wind_direction,
+            "precipitation_chance": precipitation_chance,
+        }
+
+    injuries_by_team_id: dict = {}
+    for tid, player_name, inj_status, description in injury_rows:
+        injuries_by_team_id.setdefault(tid, []).append({
+            "player_name": player_name,
+            "injury_status": inj_status,
+            "injury_description": description,
+        })
+
+    bullpen_by_team_id = {
+        tid: {
+            "previous_game_date": prev_date.isoformat() if prev_date else None,
+            "bullpen_innings_last_game": float(innings) if innings is not None else None,
+            "played_yesterday": played_yesterday,
+        }
+        for tid, prev_date, innings, played_yesterday in bullpen_rows
+    }
+
+    line_movement = []
+    for sb, open_home, open_away, open_ts, late_home, late_away, late_ts in movement_rows:
+        line_movement.append({
+            "game_id": gid,
+            "sportsbook": sb,
+            "team": home_team,
+            "side": "home",
+            "opening_moneyline": open_home,
+            "latest_moneyline": late_home,
+            "movement": late_home - open_home,
+            "opening_timestamp": open_ts,
+            "latest_timestamp": late_ts,
+        })
+        line_movement.append({
+            "game_id": gid,
+            "sportsbook": sb,
+            "team": away_team,
+            "side": "away",
+            "opening_moneyline": open_away,
+            "latest_moneyline": late_away,
+            "movement": late_away - open_away,
+            "opening_timestamp": open_ts,
+            "latest_timestamp": late_ts,
+        })
+
+    return {
+        "game_id": gid,
+        "game_date": game_date.isoformat() if hasattr(game_date, "isoformat") else str(game_date),
+        "game_time": game_time,
+        "status": status,
+        "away_team": away_team,
+        "home_team": home_team,
+        "away_pitcher": away_pitcher,
+        "home_pitcher": home_pitcher,
+        "away_record": record_by_team_id.get(away_team_id),
+        "home_record": record_by_team_id.get(home_team_id),
+        "odds": odds,
+        "line_movement": line_movement,
+        "weather": weather,
+        "away_injuries": injuries_by_team_id.get(away_team_id, []),
+        "home_injuries": injuries_by_team_id.get(home_team_id, []),
+        "away_bullpen": bullpen_by_team_id.get(away_team_id),
+        "home_bullpen": bullpen_by_team_id.get(home_team_id),
+    }
+
+
+@router.get("/game/{game_id}")
+def get_research_by_game(game_id: int):
+    try:
+        conn = get_db_connection()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Database connection failed: {e}")
+
+    try:
+        result = _get_research_for_game(conn, game_id)
+    except Exception as e:
+        conn.close()
+        raise HTTPException(status_code=500, detail=f"Database query failed: {e}")
+
+    conn.close()
+
+    if result is None:
+        raise HTTPException(status_code=404, detail=f"Game {game_id} not found")
+
+    return result
+
+
 @router.get("/today")
 def get_research_today():
     try:

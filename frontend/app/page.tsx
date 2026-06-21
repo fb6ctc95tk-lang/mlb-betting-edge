@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useState } from "react";
 import type { CSSProperties } from "react";
 import DataQualityCard from "./components/DataQualityCard";
@@ -288,6 +289,7 @@ export default function Home() {
         <table style={{ borderCollapse: "collapse", width: "100%" }}>
           <thead>
             <tr>
+              <th style={cellStyle}>Detail</th>
               <th style={cellStyle}>Away Team</th>
               <th style={cellStyle}>Home Team</th>
               <th style={cellStyle}>Game Time</th>
@@ -320,6 +322,9 @@ export default function Home() {
 
               return (
                 <tr key={game.game_id}>
+                  <td style={cellStyle}>
+                    <Link href={`/game/${game.game_id}`}>View</Link>
+                  </td>
                   <td style={cellStyle}>{game.away_team}</td>
                   <td style={cellStyle}>{game.home_team}</td>
                   <td style={cellStyle}>
