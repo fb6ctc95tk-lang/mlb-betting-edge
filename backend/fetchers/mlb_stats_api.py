@@ -42,6 +42,8 @@ team_record = {
 from datetime import date
 import requests
 
+
+
 BASE_URL = "https://statsapi.mlb.com/api/v1"
 
 # MLB Stats API uses these IDs for the two leagues
@@ -136,6 +138,52 @@ def get_team_records(season=None):
             records.append(_normalize_record(team_record, season))
 
     return records
+
+
+def get_bullpen_innings(game_pk, side):
+    """
+    Fetch total bullpen innings pitched for one team in a completed game.
+
+    side: 'home' or 'away'
+
+    Returns a float in baseball IP notation: 3.1 means 3 innings + 1 out.
+    Returns 0.0 if only the starter pitched (complete game).
+    """
+    url = f"{BASE_URL}/game/{game_pk}/boxscore"
+    response = requests.get(url, timeout=10)
+    response.raise_for_status()
+    data = response.json()
+
+    team_data = data.get("teams", {}).get(side, {})
+    pitcher_ids = team_data.get("pitchers", [])
+    players = team_data.get("players", {})
+
+    # First entry is the starter; everything after is the bullpen.
+    bullpen_ids = pitcher_ids[1:]
+    total_outs = sum(
+        _ip_to_outs(
+            players.get(f"ID{pid}", {})
+                   .get("stats", {})
+                   .get("pitching", {})
+                   .get("inningsPitched", "0")
+        )
+        for pid in bullpen_ids
+    )
+    return _outs_to_ip(total_outs)
+
+
+def _ip_to_outs(ip_str):
+    """Convert baseball IP string '6.2' (6 innings, 2 outs) to total outs (20)."""
+    try:
+        parts = str(ip_str).split(".")
+        return int(parts[0]) * 3 + (int(parts[1]) if len(parts) > 1 else 0)
+    except (ValueError, IndexError):
+        return 0
+
+
+def _outs_to_ip(total_outs):
+    """Convert total outs to baseball IP float: 20 outs → 6.2."""
+    return float(f"{total_outs // 3}.{total_outs % 3}")
 
 
 def _normalize_record(team_record, season):
