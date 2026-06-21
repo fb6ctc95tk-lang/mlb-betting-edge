@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import type { CSSProperties } from "react";
+import DataQualityCard from "./components/DataQualityCard";
 import IngestionStatusCard from "./components/IngestionStatusCard";
 
 type Odds = {
@@ -241,7 +242,10 @@ export default function Home() {
     <main style={{ padding: "2rem", fontFamily: "Arial, sans-serif" }}>
       <h1>MLB Betting Edge</h1>
 
-      <IngestionStatusCard />
+      <div style={{ display: "flex", gap: "1rem", flexWrap: "wrap" }}>
+        <IngestionStatusCard />
+        <DataQualityCard />
+      </div>
 
       <div style={{ marginTop: "1.5rem" }}>
         <label htmlFor="date-picker" style={{ marginRight: "0.5rem", fontWeight: "bold" }}>
