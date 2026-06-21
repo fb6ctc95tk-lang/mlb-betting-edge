@@ -244,9 +244,29 @@ function compMaxMove(game: Game): string {
   return max === 0 ? "0" : `+${Math.round(max)}`;
 }
 
+function SectionRow({ label }: { label: string }) {
+  return (
+    <tr>
+      <td colSpan={3} style={{
+        ...cellStyle,
+        background: "#ebebeb",
+        fontWeight: "bold",
+        fontSize: "0.78em",
+        color: "#555",
+        letterSpacing: "0.06em",
+        textTransform: "uppercase",
+        paddingTop: "10px",
+      }}>
+        {label}
+      </td>
+    </tr>
+  );
+}
+
 function ComparisonTable({ a, b }: { a: Game; b: Game }) {
   const labelCell: CSSProperties = { ...cellStyle, fontWeight: "bold", background: "#f5f5f5", whiteSpace: "nowrap" };
   const headerCell: CSSProperties = { ...cellStyle, background: "#e8f0fe", fontWeight: "bold", textAlign: "center" };
+  const noFlags = <span style={{ color: "#888" }}>None</span>;
   return (
     <div style={{ marginTop: "1rem", overflowX: "auto" }}>
       <table style={{ borderCollapse: "collapse", width: "100%" }}>
@@ -258,6 +278,14 @@ function ComparisonTable({ a, b }: { a: Game; b: Game }) {
           </tr>
         </thead>
         <tbody>
+          <SectionRow label="Research Flags" />
+          <tr>
+            <td style={labelCell}>Flags</td>
+            <td style={cellStyle}><ResearchFlags flags={getGameFlags(a)} emptyState={noFlags} /></td>
+            <td style={cellStyle}><ResearchFlags flags={getGameFlags(b)} emptyState={noFlags} /></td>
+          </tr>
+
+          <SectionRow label="Matchup" />
           <tr>
             <td style={labelCell}>Away Record</td>
             <td style={cellStyle}>{a.away_record ?? "—"}</td>
@@ -268,6 +296,8 @@ function ComparisonTable({ a, b }: { a: Game; b: Game }) {
             <td style={cellStyle}>{a.home_record ?? "—"}</td>
             <td style={cellStyle}>{b.home_record ?? "—"}</td>
           </tr>
+
+          <SectionRow label="Pitchers" />
           <tr>
             <td style={labelCell}>Away Pitcher</td>
             <td style={cellStyle}>{a.away_pitcher ?? "TBD"}</td>
@@ -278,11 +308,47 @@ function ComparisonTable({ a, b }: { a: Game; b: Game }) {
             <td style={cellStyle}>{a.home_pitcher ?? "TBD"}</td>
             <td style={cellStyle}>{b.home_pitcher ?? "TBD"}</td>
           </tr>
+
+          <SectionRow label="Recent Form" />
+          <tr>
+            <td style={labelCell}>Away Last 10</td>
+            <td style={cellStyle}>{formatTeamForm(a.away_team_form)}</td>
+            <td style={cellStyle}>{formatTeamForm(b.away_team_form)}</td>
+          </tr>
+          <tr>
+            <td style={labelCell}>Home Last 10</td>
+            <td style={cellStyle}>{formatTeamForm(a.home_team_form)}</td>
+            <td style={cellStyle}>{formatTeamForm(b.home_team_form)}</td>
+          </tr>
+          <tr>
+            <td style={labelCell}>Away Streak</td>
+            <td style={cellStyle}>{a.away_team_streak?.streak_label ?? "—"}</td>
+            <td style={cellStyle}>{b.away_team_streak?.streak_label ?? "—"}</td>
+          </tr>
+          <tr>
+            <td style={labelCell}>Home Streak</td>
+            <td style={cellStyle}>{a.home_team_streak?.streak_label ?? "—"}</td>
+            <td style={cellStyle}>{b.home_team_streak?.streak_label ?? "—"}</td>
+          </tr>
+          <tr>
+            <td style={labelCell}>Away Road Record</td>
+            <td style={cellStyle}>{a.away_team_splits?.road_record ?? "—"}</td>
+            <td style={cellStyle}>{b.away_team_splits?.road_record ?? "—"}</td>
+          </tr>
+          <tr>
+            <td style={labelCell}>Home Home Record</td>
+            <td style={cellStyle}>{a.home_team_splits?.home_record ?? "—"}</td>
+            <td style={cellStyle}>{b.home_team_splits?.home_record ?? "—"}</td>
+          </tr>
+
+          <SectionRow label="Weather" />
           <tr>
             <td style={labelCell}>Weather</td>
             <td style={cellStyle}>{compWeather(a.weather)}</td>
             <td style={cellStyle}>{compWeather(b.weather)}</td>
           </tr>
+
+          <SectionRow label="Bullpen" />
           <tr>
             <td style={labelCell}>Away Bullpen</td>
             <td style={cellStyle}>{compBullpen(a.away_bullpen)}</td>
@@ -293,6 +359,8 @@ function ComparisonTable({ a, b }: { a: Game; b: Game }) {
             <td style={cellStyle}>{compBullpen(a.home_bullpen)}</td>
             <td style={cellStyle}>{compBullpen(b.home_bullpen)}</td>
           </tr>
+
+          <SectionRow label="Injuries" />
           <tr>
             <td style={labelCell}>Away Injuries</td>
             <td style={cellStyle}>{compInjuries(a.away_injuries)}</td>
@@ -303,6 +371,8 @@ function ComparisonTable({ a, b }: { a: Game; b: Game }) {
             <td style={cellStyle}>{compInjuries(a.home_injuries)}</td>
             <td style={cellStyle}>{compInjuries(b.home_injuries)}</td>
           </tr>
+
+          <SectionRow label="Odds" />
           <tr>
             <td style={labelCell}>Bet365 (Away / Home)</td>
             <td style={cellStyle}>{compOdds(a, "Bet365")}</td>
@@ -313,6 +383,8 @@ function ComparisonTable({ a, b }: { a: Game; b: Game }) {
             <td style={cellStyle}>{compOdds(a, "DraftKings")}</td>
             <td style={cellStyle}>{compOdds(b, "DraftKings")}</td>
           </tr>
+
+          <SectionRow label="Line Movement" />
           <tr>
             <td style={labelCell}>Max Line Move</td>
             <td style={cellStyle}>{compMaxMove(a)}</td>
@@ -362,6 +434,14 @@ export default function Home() {
     setCompareIdA((prev) => (prev === gameId ? null : prev));
     setCompareIdB((prev) => (prev === gameId ? null : prev));
   }
+
+  useEffect(() => {
+    const ws = (games ?? []).filter((g) => workspaceIds.has(g.game_id));
+    if (ws.length === 2) {
+      setCompareIdA(ws[0].game_id);
+      setCompareIdB(ws[1].game_id);
+    }
+  }, [games, workspaceIds]);
 
   useEffect(() => {
     const apiUrl = process.env.NEXT_PUBLIC_API_URL;
