@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useEffect, useState } from "react";
 import type { CSSProperties } from "react";
+import { getGameFlags } from "../../../lib/gameFlags";
 
 type Odds = {
   sportsbook: string;
@@ -116,6 +117,24 @@ function formatBullpenDate(dateStr: string, playedYesterday: boolean): string {
   return playedYesterday ? `${label} (yesterday)` : label;
 }
 
+function FlagBadge({ label, color }: { label: string; color: string }) {
+  return (
+    <span style={{
+      display: "inline-block",
+      padding: "2px 8px",
+      fontSize: "0.8em",
+      fontWeight: "bold",
+      color: "#fff",
+      background: color,
+      borderRadius: "3px",
+      marginRight: "6px",
+      whiteSpace: "nowrap",
+    }}>
+      {label}
+    </span>
+  );
+}
+
 function Row({ label, value }: { label: string; value: React.ReactNode }) {
   return (
     <div style={{ marginBottom: "4px" }}>
@@ -207,6 +226,8 @@ export default function GameDetailPage() {
     );
   }
 
+  const flags = getGameFlags(game);
+
   return (
     <main style={{ padding: "2rem", fontFamily: "Arial, sans-serif", maxWidth: "900px" }}>
       <Link href="/">← Dashboard</Link>
@@ -220,6 +241,13 @@ export default function GameDetailPage() {
         {" · "}
         {game.status.replace("_", " ")}
       </div>
+      {flags.length > 0 && (
+        <div style={{ marginTop: "0.5rem" }}>
+          {flags.map((f) => (
+            <FlagBadge key={f.label} label={`${f.emoji} ${f.label}`} color={f.color} />
+          ))}
+        </div>
+      )}
 
       {/* Records & Pitchers */}
       <div style={sectionStyle}>

@@ -5,7 +5,8 @@ import { useEffect, useState } from "react";
 import type { CSSProperties } from "react";
 import DataQualityCard from "./components/DataQualityCard";
 import IngestionStatusCard from "./components/IngestionStatusCard";
-import { applyFilters, LINE_MOVE_THRESHOLD } from "../lib/gameFilters";
+import { applyFilters } from "../lib/gameFilters";
+import { getGameFlags } from "../lib/gameFlags";
 
 type Odds = {
   sportsbook: string;
@@ -617,11 +618,7 @@ export default function Home() {
             {displayedGames.map((game) => {
               const bet365 = findOdds(game, "Bet365");
               const draftKings = findOdds(game, "DraftKings");
-              const hasInjuries = game.away_injuries.length > 0 || game.home_injuries.length > 0;
-              const maxMove = game.line_movement.length > 0
-                ? Math.max(...game.line_movement.map((m) => Math.abs(m.movement)))
-                : 0;
-              const hasLineMoves = maxMove > LINE_MOVE_THRESHOLD;
+              const flags = getGameFlags(game);
 
               return (
                 <tr key={game.game_id}>
@@ -642,8 +639,12 @@ export default function Home() {
                     </button>
                   </td>
                   <td style={{ ...cellStyle, whiteSpace: "nowrap" }}>
-                    {hasInjuries && <FlagBadge label="INJURIES" color="crimson" />}
-                    {hasLineMoves && <FlagBadge label="LINE MOVE" color="#1a56a0" />}
+                    {flags.length === 0
+                      ? <span style={{ color: "#aaa" }}>—</span>
+                      : flags.map((f) => (
+                          <FlagBadge key={f.label} label={`${f.emoji} ${f.label}`} color={f.color} />
+                        ))
+                    }
                   </td>
                   <td style={cellStyle}>{game.away_team}</td>
                   <td style={cellStyle}>{game.home_team}</td>
