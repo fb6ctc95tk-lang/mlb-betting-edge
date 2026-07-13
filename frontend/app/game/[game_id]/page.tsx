@@ -17,6 +17,29 @@ type Odds = {
   home_implied_probability: number;
 };
 
+type TeamForm = {
+  last_10_games_count: number;
+  last_10_wins: number;
+  last_10_losses: number;
+  last_10_record: string;
+  last_10_run_diff: number;
+};
+
+type TeamStreak = {
+  streak_type: string | null;
+  streak_count: number;
+  streak_label: string;
+};
+
+type TeamSplits = {
+  road_record?: string;
+  road_wins?: number;
+  road_losses?: number;
+  home_record?: string;
+  home_wins?: number;
+  home_losses?: number;
+};
+
 type Movement = {
   game_id: number;
   sportsbook: string;
@@ -59,6 +82,12 @@ type GameDetail = {
   home_pitcher: string | null;
   away_record: string | null;
   home_record: string | null;
+  away_team_form: TeamForm | null;
+  home_team_form: TeamForm | null;
+  away_team_streak: TeamStreak | null;
+  home_team_streak: TeamStreak | null;
+  away_team_splits: TeamSplits | null;
+  home_team_splits: TeamSplits | null;
   odds: Odds[];
   line_movement: Movement[];
   weather: Weather | null;

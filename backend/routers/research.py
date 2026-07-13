@@ -308,7 +308,7 @@ def _get_research_for_game(conn, game_id):
 
     cur.execute(
         """
-        SELECT DISTINCT ON (team_id) team_id, wins, losses
+        SELECT DISTINCT ON (team_id) team_id, wins, losses, home_wins, home_losses, away_wins, away_losses
         FROM team_records
         WHERE team_id IN (%s, %s)
         ORDER BY team_id, season DESC
@@ -382,7 +382,20 @@ def _get_research_for_game(conn, game_id):
 
     cur.close()
 
-    record_by_team_id = {tid: f"{w}-{l}" for tid, w, l in record_rows}
+    away_form = get_team_last_10_form(conn, away_team_id, game_date)
+    home_form = get_team_last_10_form(conn, home_team_id, game_date)
+    away_streak = get_team_streak(conn, away_team_id, game_date)
+    home_streak = get_team_streak(conn, home_team_id, game_date)
+
+    record_by_team_id = {tid: f"{w}-{l}" for tid, w, l, hw, hl, aw, al in record_rows}
+
+    splits_by_team_id = {
+        tid: {
+            "home_wins": hw, "home_losses": hl, "home_record": f"{hw}-{hl}",
+            "away_wins": aw, "away_losses": al, "road_record": f"{aw}-{al}",
+        }
+        for tid, w, l, hw, hl, aw, al in record_rows
+    }
 
     odds = [
         {
@@ -458,6 +471,20 @@ def _get_research_for_game(conn, game_id):
         "home_pitcher": home_pitcher,
         "away_record": record_by_team_id.get(away_team_id),
         "home_record": record_by_team_id.get(home_team_id),
+        "away_team_form": away_form,
+        "home_team_form": home_form,
+        "away_team_streak": away_streak,
+        "home_team_streak": home_streak,
+        "away_team_splits": {
+            "road_record": splits_by_team_id[away_team_id]["road_record"],
+            "road_wins": splits_by_team_id[away_team_id]["away_wins"],
+            "road_losses": splits_by_team_id[away_team_id]["away_losses"],
+        } if away_team_id in splits_by_team_id else None,
+        "home_team_splits": {
+            "home_record": splits_by_team_id[home_team_id]["home_record"],
+            "home_wins": splits_by_team_id[home_team_id]["home_wins"],
+            "home_losses": splits_by_team_id[home_team_id]["home_losses"],
+        } if home_team_id in splits_by_team_id else None,
         "odds": odds,
         "line_movement": line_movement,
         "weather": weather,

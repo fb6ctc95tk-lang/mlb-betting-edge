@@ -76,6 +76,17 @@ MVP Complete — Operational Automation Active
 - [x] `frontend/lib/researchInsights.test.ts` — 17 Vitest tests
 - [x] Frontend-only; no backend, database, or API changes
 
+### Phase 10 — Game Detail Research Parity (Complete)
+- [x] `GET /research/game/{id}` now returns the full research field set required by Research Insights and Market Opportunities
+- [x] Added: `away_team_form`, `home_team_form` — via existing `get_team_last_10_form` service
+- [x] Added: `away_team_streak`, `home_team_streak` — via existing `get_team_streak` service
+- [x] Added: `away_team_splits`, `home_team_splits` — from expanded records query (now fetches split columns)
+- [x] Field names and structure match `/research/today` exactly — no second incompatible shape
+- [x] Frontend `GameDetail` TypeScript type updated with `TeamForm`, `TeamStreak`, `TeamSplits` and all six new fields
+- [x] Research Insights (form-market-divergence) and Market Opportunities now fire on the Game Detail page
+- [x] `backend/tests/test_game_detail.py` expanded: 5 → 11 tests; 6 new tests cover form shape, form values, streak shape, streak values, splits shape, splits values
+- [x] No new APIs, ingestion systems, database tables, market types, predictions, EV, confidence ratings, or recommendations added
+
 ### Phase 9 — Market Opportunity Layer (Complete)
 - [x] `frontend/lib/marketOpportunities.ts` — MarketOpportunity type, MarketOpportunityGenerator registry, `getMarketOpportunities(game, insights)`
 - [x] FULL_GAME_MONEYLINE is the only supported MarketType in v1
@@ -162,13 +173,13 @@ PostgreSQL ──► FastAPI ──► /research/* ──► Next.js Dashboard
 
 ## Current Test Coverage
 
-**Backend — 44 pytest tests (7 modules)**
+**Backend — 50 pytest tests (7 modules)**
 - `test_research_endpoints.py` — 9 tests: /research/today, /research/date/{date}, /research/available-dates
 - `test_weather.py` — 6 tests: weather fields, stadium coordinates (all 30 teams)
 - `test_injuries.py` — 7 tests: player parsing, team mapping, edge cases
 - `test_bullpen.py` — 7 tests: innings math, research endpoint integration
 - `test_data_quality.py` — 6 tests: healthy/warning/failed states
-- `test_game_detail.py` — 5 tests: 200/404, required keys, teams/records, weather null
+- `test_game_detail.py` — 11 tests: 200/404, required keys, teams/records, weather null, form shape/values, streak shape/values, splits shape/values
 - `test_health_ingestion.py` — 4 tests: log parsing for healthy/failed/missing/incomplete logs
 - Run with: `backend/venv/Scripts/python.exe -m pytest backend/tests/ -v`
 - Tests hit real local PostgreSQL — no mocks

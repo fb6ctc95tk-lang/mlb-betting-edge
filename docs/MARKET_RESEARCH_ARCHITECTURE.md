@@ -37,7 +37,7 @@ Built in `backend/routers/research.py` from `team_records` and game history:
 - Road splits: `road_wins`, `road_losses`
 - Streak: `current_streak` (integer), `streak_type` ("W" or "L")
 
-**Important gap:** The game detail endpoint (`GET /research/game/{id}`) does NOT return form, splits, or streak. Only the full research endpoints (`/research/today`, `/research/date/{date}`) include those fields.
+The game detail endpoint (`GET /research/game/{id}`) now returns the same form, splits, and streak fields as the full research endpoints. This parity was added in Phase 10 and enables Research Insights and Market Opportunities to fire correctly on the Game Detail page.
 
 ### 1.5 Odds History
 
