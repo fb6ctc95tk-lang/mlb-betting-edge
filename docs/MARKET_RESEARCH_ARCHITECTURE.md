@@ -1,8 +1,8 @@
 # Market Research Architecture
 ## MLB Betting Edge — Phase 8 Research Layer Foundation
 
-**Status:** Design document — no code changes
-**Date:** 2026-07-12
+**Status:** Active — Phase 9 implemented MarketOpportunity layer (2026-07-13)
+**Date:** 2026-07-12 (updated 2026-07-13)
 
 This document describes the current architecture and implementation roadmap based only on confirmed data sources currently available in the application. It intentionally avoids assumptions about future APIs, sportsbook markets, or predictive models.
 
@@ -243,7 +243,7 @@ Five distinct types. Each type has exactly one job and lives in one layer.
 
 ---
 
-### 3.3 MarketOpportunity (not yet built — `frontend/lib/marketOpportunities.ts`)
+### 3.3 MarketOpportunity (implemented — `frontend/lib/marketOpportunities.ts`)
 
 **Layer:** Market research
 

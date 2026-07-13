@@ -68,6 +68,26 @@ MVP Complete — Operational Automation Active
 - [x] Register Task Scheduler tasks — "MLB Ingestion 11AM" and "MLB Ingestion 7PM"
 - [x] Verified: test run on 2026-07-12 produced exit=0, 15 games saved, log written
 
+### Phase 8 — Research Insight Layer (Complete)
+- [x] `frontend/lib/researchInsights.ts` — ResearchInsight type, InsightableGame structural type, INSIGHT_GENERATORS registry
+- [x] Form vs. Market Divergence — first insight generator (hot underdog / cold favorite)
+- [x] Homepage integration — insight count badge in game Detail cell
+- [x] Game detail page integration — Research Insights section with full cards
+- [x] `frontend/lib/researchInsights.test.ts` — 17 Vitest tests
+- [x] Frontend-only; no backend, database, or API changes
+
+### Phase 9 — Market Opportunity Layer (Complete)
+- [x] `frontend/lib/marketOpportunities.ts` — MarketOpportunity type, MarketOpportunityGenerator registry, `getMarketOpportunities(game, insights)`
+- [x] FULL_GAME_MONEYLINE is the only supported MarketType in v1
+- [x] Form Divergence → Moneyline — first opportunity generator: converts Form vs. Market Divergence insights into a FULL_GAME_MONEYLINE research candidate
+- [x] Layer receives pre-computed ResearchInsights; does not duplicate insight logic
+- [x] No EV, confidence ratings, predictions, recommendations, or scores
+- [x] Homepage integration — market opportunity count badge in game Detail cell
+- [x] Game detail page integration — Market Opportunities section with full card display (market type, title, summary, reasons, caution notes)
+- [x] `frontend/lib/marketOpportunities.test.ts` — 14 Vitest tests
+- [x] Frontend-only; no backend, database, or API changes
+- [x] Other markets (totals, NRFI, F5, player props) deferred — supporting data does not currently exist
+
 ### Phase 7 — Research UX (Complete)
 - [x] `GET /game/{game_id}` — full research detail endpoint for a single game
 - [x] Game detail page (`/game/[game_id]`) — dedicated research view per game
@@ -153,8 +173,10 @@ PostgreSQL ──► FastAPI ──► /research/* ──► Next.js Dashboard
 - Run with: `backend/venv/Scripts/python.exe -m pytest backend/tests/ -v`
 - Tests hit real local PostgreSQL — no mocks
 
-**Frontend — 34 Vitest tests (3 modules)**
+**Frontend — 65 Vitest tests (5 modules)**
 - `gameFilters.test.ts`, `gameFlags.test.ts`, `gameFlagSummary.test.ts`
+- `researchInsights.test.ts` — 17 tests: form vs. market divergence, thresholds, multi-book averaging
+- `marketOpportunities.test.ts` — 14 tests: generator registry, opportunity shape, caution note content
 - Run with: `cd frontend && npm test`
 
 ---

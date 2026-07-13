@@ -9,6 +9,7 @@ import { applyFilters } from "../lib/gameFilters";
 import { getGameFlags } from "../lib/gameFlags";
 import { getGameFlagSummary } from "../lib/gameFlagSummary";
 import { getResearchInsights } from "../lib/researchInsights";
+import { getMarketOpportunities } from "../lib/marketOpportunities";
 import ResearchFlags from "../components/ResearchFlags";
 
 type Odds = {
@@ -745,6 +746,7 @@ export default function Home() {
               const draftKings = findOdds(game, "DraftKings");
               const flags = getGameFlags(game);
               const insights = getResearchInsights(game);
+              const opportunities = getMarketOpportunities(game, insights);
 
               return (
                 <tr key={game.game_id}>
@@ -766,6 +768,11 @@ export default function Home() {
                     {insights.length > 0 && (
                       <div style={{ marginTop: "4px", fontSize: "0.82em", color: "#92400e" }}>
                         💡 {insights.length} insight{insights.length !== 1 ? "s" : ""}
+                      </div>
+                    )}
+                    {opportunities.length > 0 && (
+                      <div style={{ marginTop: "4px", fontSize: "0.82em", color: "#1e40af" }}>
+                        📋 {opportunities.length} market {opportunities.length !== 1 ? "opportunities" : "opportunity"}
                       </div>
                     )}
                   </td>

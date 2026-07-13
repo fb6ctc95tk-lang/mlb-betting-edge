@@ -33,6 +33,7 @@ type OddsEntry = {
 // (e.g. the game detail page, which doesn't include team form data).
 // Any game type whose fields are a superset of this is assignable without casting.
 export type InsightableGame = {
+  game_id?: number;
   away_team: string;
   home_team: string;
   away_team_form?: TeamForm | null;

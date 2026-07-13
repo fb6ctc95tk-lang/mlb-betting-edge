@@ -6,6 +6,7 @@ import { useEffect, useState } from "react";
 import type { CSSProperties } from "react";
 import { getGameFlags } from "../../../lib/gameFlags";
 import { getResearchInsights, type ResearchInsight } from "../../../lib/researchInsights";
+import { getMarketOpportunities, type MarketOpportunity } from "../../../lib/marketOpportunities";
 import ResearchFlags from "../../../components/ResearchFlags";
 
 type Odds = {
@@ -212,6 +213,7 @@ export default function GameDetailPage() {
 
   const flags = getGameFlags(game);
   const insights = getResearchInsights(game);
+  const opportunities = getMarketOpportunities(game, insights);
 
   return (
     <main style={{ padding: "2rem", fontFamily: "Arial, sans-serif", maxWidth: "900px" }}>
@@ -251,6 +253,50 @@ export default function GameDetailPage() {
               <div style={{ fontSize: "0.85em", color: "#374151", marginTop: "2px" }}>
                 {insight.description}
               </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {opportunities.length > 0 && (
+        <div style={{ marginTop: "1rem" }}>
+          <h2 style={{ margin: "0 0 0.5rem" }}>Market Opportunities</h2>
+          {opportunities.map((opp: MarketOpportunity, i: number) => (
+            <div
+              key={i}
+              style={{
+                padding: "0.75rem",
+                marginBottom: "0.75rem",
+                border: "1px solid #bfdbfe",
+                background: "#eff6ff",
+              }}
+            >
+              <div style={{ fontSize: "0.75em", fontWeight: "bold", color: "#1e40af", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: "4px" }}>
+                {opp.marketType.replace(/_/g, " ")}
+              </div>
+              <div style={{ fontWeight: "bold", fontSize: "0.95em", marginBottom: "4px" }}>
+                {opp.title}
+              </div>
+              <div style={{ fontSize: "0.85em", color: "#374151", marginBottom: "8px" }}>
+                {opp.summary}
+              </div>
+              {opp.reasons.length > 0 && (
+                <div style={{ marginBottom: "8px" }}>
+                  <div style={{ fontSize: "0.8em", fontWeight: "bold", color: "#374151", marginBottom: "2px" }}>Why this game:</div>
+                  <ul style={{ margin: 0, paddingLeft: "1.25rem" }}>
+                    {opp.reasons.map((r, j) => (
+                      <li key={j} style={{ fontSize: "0.82em", color: "#374151" }}>{r}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+              {opp.cautionNotes.length > 0 && (
+                <ul style={{ margin: 0, paddingLeft: "1.25rem" }}>
+                  {opp.cautionNotes.map((n, j) => (
+                    <li key={j} style={{ fontSize: "0.8em", color: "#6b7280", fontStyle: "italic" }}>{n}</li>
+                  ))}
+                </ul>
+              )}
             </div>
           ))}
         </div>
