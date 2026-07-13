@@ -181,6 +181,52 @@ function InjuryList({ team, injuries }: { team: string; injuries: Injury[] }) {
   );
 }
 
+function FormSummary({ team, form }: { team: string; form: TeamForm | null }) {
+  return (
+    <div style={{ flex: 1 }}>
+      <div style={{ fontWeight: "bold", marginBottom: "4px" }}>{team}</div>
+      {!form ? (
+        <span style={{ color: "#888" }}>No form data</span>
+      ) : (
+        <>
+          <div>Last {form.last_10_games_count}: {form.last_10_record}</div>
+          <div style={{ fontSize: "0.85em", color: "#555" }}>
+            Run diff: {form.last_10_run_diff >= 0 ? `+${form.last_10_run_diff}` : form.last_10_run_diff}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function StreakSummary({ team, streak }: { team: string; streak: TeamStreak | null }) {
+  return (
+    <div style={{ flex: 1 }}>
+      <div style={{ fontWeight: "bold", marginBottom: "4px" }}>{team}</div>
+      {!streak || streak.streak_type === null ? (
+        <span style={{ color: "#888" }}>No streak data</span>
+      ) : (
+        <div>{streak.streak_label}</div>
+      )}
+    </div>
+  );
+}
+
+function SplitSummary({ team, splits, side }: { team: string; splits: TeamSplits | null; side: "away" | "home" }) {
+  const record = side === "away" ? splits?.road_record : splits?.home_record;
+  const label = side === "away" ? "Road record" : "Home record";
+  return (
+    <div style={{ flex: 1 }}>
+      <div style={{ fontWeight: "bold", marginBottom: "4px" }}>{team}</div>
+      {!record ? (
+        <span style={{ color: "#888" }}>No split data</span>
+      ) : (
+        <div><span style={labelStyle}>{label}</span>{record}</div>
+      )}
+    </div>
+  );
+}
+
 function BullpenSummary({ team, bullpen }: { team: string; bullpen: Bullpen | null }) {
   return (
     <div style={{ flex: 1 }}>
@@ -338,6 +384,33 @@ export default function GameDetailPage() {
         <Row label="Home record" value={game.home_record ?? "—"} />
         <Row label="Away pitcher" value={game.away_pitcher ?? "TBD"} />
         <Row label="Home pitcher" value={game.home_pitcher ?? "TBD"} />
+      </div>
+
+      {/* Recent Form */}
+      <div style={sectionStyle}>
+        <h2>Recent Form (Last 10)</h2>
+        <div style={{ display: "flex", gap: "2rem" }}>
+          <FormSummary team={game.away_team} form={game.away_team_form} />
+          <FormSummary team={game.home_team} form={game.home_team_form} />
+        </div>
+      </div>
+
+      {/* Streak */}
+      <div style={sectionStyle}>
+        <h2>Current Streak</h2>
+        <div style={{ display: "flex", gap: "2rem" }}>
+          <StreakSummary team={game.away_team} streak={game.away_team_streak} />
+          <StreakSummary team={game.home_team} streak={game.home_team_streak} />
+        </div>
+      </div>
+
+      {/* Splits */}
+      <div style={sectionStyle}>
+        <h2>Splits</h2>
+        <div style={{ display: "flex", gap: "2rem" }}>
+          <SplitSummary team={game.away_team} splits={game.away_team_splits} side="away" />
+          <SplitSummary team={game.home_team} splits={game.home_team_splits} side="home" />
+        </div>
       </div>
 
       {/* Weather */}

@@ -76,6 +76,16 @@ MVP Complete — Operational Automation Active
 - [x] `frontend/lib/researchInsights.test.ts` — 17 Vitest tests
 - [x] Frontend-only; no backend, database, or API changes
 
+### Phase 11 — Game Detail Display Parity (Complete)
+- [x] Game Detail page now displays Recent Form (Last 10), Current Streak, and Splits sections
+- [x] `FormSummary` component — shows last-N record and run differential per team
+- [x] `StreakSummary` component — shows current win/loss streak label per team
+- [x] `SplitSummary` component — shows road record (away) and home record (home) per team
+- [x] All three sections handle null/missing data gracefully with neutral fallback text
+- [x] No new backend endpoints, database tables, APIs, or data sources
+- [x] No new market types, predictions, EV, confidence ratings, or recommendations
+- [x] Frontend-only change; no backend tests needed
+
 ### Phase 10 — Game Detail Research Parity (Complete)
 - [x] `GET /research/game/{id}` now returns the full research field set required by Research Insights and Market Opportunities
 - [x] Added: `away_team_form`, `home_team_form` — via existing `get_team_last_10_form` service
