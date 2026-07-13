@@ -8,6 +8,7 @@ import IngestionStatusCard from "./components/IngestionStatusCard";
 import { applyFilters } from "../lib/gameFilters";
 import { getGameFlags } from "../lib/gameFlags";
 import { getGameFlagSummary } from "../lib/gameFlagSummary";
+import { getResearchInsights } from "../lib/researchInsights";
 import ResearchFlags from "../components/ResearchFlags";
 
 type Odds = {
@@ -743,6 +744,7 @@ export default function Home() {
               const bet365 = findOdds(game, "Bet365");
               const draftKings = findOdds(game, "DraftKings");
               const flags = getGameFlags(game);
+              const insights = getResearchInsights(game);
 
               return (
                 <tr key={game.game_id}>
@@ -761,6 +763,11 @@ export default function Home() {
                     >
                       {workspaceIds.has(game.game_id) ? "✓ Workspace" : "+ Workspace"}
                     </button>
+                    {insights.length > 0 && (
+                      <div style={{ marginTop: "4px", fontSize: "0.82em", color: "#92400e" }}>
+                        💡 {insights.length} insight{insights.length !== 1 ? "s" : ""}
+                      </div>
+                    )}
                   </td>
                   <td style={{ ...cellStyle, whiteSpace: "nowrap" }}>
                     <ResearchFlags

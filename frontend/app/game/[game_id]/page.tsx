@@ -5,6 +5,7 @@ import { useParams } from "next/navigation";
 import { useEffect, useState } from "react";
 import type { CSSProperties } from "react";
 import { getGameFlags } from "../../../lib/gameFlags";
+import { getResearchInsights, type ResearchInsight } from "../../../lib/researchInsights";
 import ResearchFlags from "../../../components/ResearchFlags";
 
 type Odds = {
@@ -210,6 +211,7 @@ export default function GameDetailPage() {
   }
 
   const flags = getGameFlags(game);
+  const insights = getResearchInsights(game);
 
   return (
     <main style={{ padding: "2rem", fontFamily: "Arial, sans-serif", maxWidth: "900px" }}>
@@ -227,6 +229,30 @@ export default function GameDetailPage() {
       {flags.length > 0 && (
         <div style={{ marginTop: "0.5rem" }}>
           <ResearchFlags flags={flags} />
+        </div>
+      )}
+
+      {insights.length > 0 && (
+        <div style={{ marginTop: "1rem" }}>
+          <h2 style={{ margin: "0 0 0.5rem" }}>Research Insights</h2>
+          {insights.map((insight: ResearchInsight, i: number) => (
+            <div
+              key={i}
+              style={{
+                padding: "0.6rem 0.75rem",
+                marginBottom: "0.5rem",
+                borderLeft: `3px solid ${insight.severity === "attention" ? "#b45309" : "#2563eb"}`,
+                background: insight.severity === "attention" ? "#fffbeb" : "#eff6ff",
+              }}
+            >
+              <div style={{ fontWeight: "bold", fontSize: "0.9em", color: insight.severity === "attention" ? "#92400e" : "#1e40af" }}>
+                {insight.title}
+              </div>
+              <div style={{ fontSize: "0.85em", color: "#374151", marginTop: "2px" }}>
+                {insight.description}
+              </div>
+            </div>
+          ))}
         </div>
       )}
 
