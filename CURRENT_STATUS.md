@@ -1,7 +1,7 @@
 # Current Status — MLB Betting Edge
 
-**Last updated:** 2026-06-15
-**Current Phase:** Phase 3 — Dashboard MVP (homepage built and verified)
+**Last updated:** 2026-07-12
+**Current Phase:** MVP Complete — Operational Automation Active
 
 This file is a "save point" for the project. If you take a break and come
 back later (or open a new chat with Claude Code), read this file first —
@@ -11,394 +11,146 @@ it explains exactly what's working, what's been tested, and what to do next.
 
 ## 1. What Currently Works
 
-- **Project structure** — folders for backend, frontend, database, and docs
-  are all set up (see `README.md` for the full layout).
-- **PostgreSQL database is live** — PostgreSQL 17.10 is installed and
-  running locally. The `mlb_betting_edge` database exists, and
-  `database/schema.sql` has been executed successfully — all 5 tables
-  exist: `teams`, `games`, `starting_pitchers`, `odds_history` (now
-  includes a `sportsbook` column), and `team_records`.
-- **Free MLB game data** — `backend/fetchers/mlb_stats_api.py` can fetch
-  today's games, scores, starting pitchers, and team win/loss records from
-  the official free MLB Stats API. No API key needed.
-- **MLB odds data** — `backend/fetchers/odds_api_io.py` can fetch live
-  moneyline odds (the "who's favored to win" numbers) for MLB games from
-  OddsAPI.io, in the same "standard shape" pattern as the MLB Stats API
-  fetcher.
-- **Live data is saved to PostgreSQL** —
-  `backend/scripts/save_live_data.py` fetches today's games, probable
-  starting pitchers, current team win/loss records, and current moneyline
-  odds, then saves them into the database (upserting games, starting
-  pitchers, and team records; inserting new odds snapshots each run).
-- **Read-only FastAPI backend** — `backend/main.py` wires together a small
-  FastAPI app (`backend/db.py` for the database connection, plus routers in
-  `backend/routers/`) with 4 working endpoints, all reading from
-  PostgreSQL:
-  - `GET /health` — returns `{"status": "ok"}`
-  - `GET /games/today` — today's games (joins `games` + `teams`, plus
-    `starting_pitchers` if available). Now also returns `game_time`
-    (HH:MM, UTC).
-  - `GET /odds/latest` — latest moneyline odds per game/team/sportsbook
-    from `odds_history`
-  - `GET /odds/today` — latest moneyline odds for today's games only, one
-    row per game/sportsbook (game_id, game_date, game_time, sportsbook,
-    away_team, home_team, away_moneyline, home_moneyline, recorded_at)
-  - `GET /games/today-with-odds` — today's games (game_id, game_date,
-    game_time, away_team, home_team, away_pitcher, home_pitcher,
-    away_record, home_record, status), each with an `odds` array of the
-    latest moneyline per sportsbook (empty array if no odds yet),
-    including each side's implied probability percentage. Pitchers are
-    `null` if not yet announced; records are formatted `"wins-losses"`.
-  - `GET /teams` — all 30 teams
-  CORS is enabled for `http://localhost:3000` (GET only) so the Next.js
-  dashboard can call it from the browser. No write endpoints, no
-  authentication, no cloud deployment — this is a local, read-only API.
-- **Next.js dashboard (frontend/)** — a Next.js 16 app (TypeScript, App
-  Router, ESLint, no Tailwind) with one page: the homepage. It fetches
-  `GET /games/today-with-odds` and shows a table of today's games (Away
-  Team, Home Team, Game Time, Status, Away Pitcher, Home Pitcher, Away
-  Record, Home Record), plus Bet365 and DraftKings Moneyline and Implied
-  Probability columns (each shown as "Away / Home"), with loading, error,
-  and empty states. Games without odds for a sportsbook show "-" in that
-  sportsbook's columns, and a `null` pitcher also shows "-", without
-  hiding the game.
+### Database
+- **PostgreSQL 17.10** running locally. Database `mlb_betting_edge` has 5 tables:
+  `teams`, `games`, `starting_pitchers`, `odds_history`, `team_records`.
+- All 30 MLB teams are seeded.
+
+### Data Ingestion
+- `backend/scripts/save_live_data.py` fetches and saves:
+  - Today's games (from MLB Stats API — free, no key)
+  - Probable starting pitchers (from MLB Stats API)
+  - Team win/loss records (from MLB Stats API)
+  - Moneyline odds — Bet365 + DraftKings (from OddsAPI.io — requires API key)
+  - Injury reports (from ESPN — free, no key)
+  - Bullpen context — innings pitched in previous game per team (from MLB Stats API)
+  - Weather at stadium — temperature, wind, precipitation chance (from Open-Meteo — free, no key)
+- Accepts an optional `--date YYYY-MM-DD` flag for backfilling historical data.
+- `backend/scripts/run_ingestion.bat` wraps the above script for Task Scheduler:
+  writes a timestamped start/end block with exit code to `logs/ingestion.log`.
+
+### Automated Daily Ingestion (as of 2026-07-12)
+- Two Windows Task Scheduler tasks are registered and active:
+  - **"MLB Ingestion 11AM"** — runs daily at 11:00 AM, captures morning lines
+  - **"MLB Ingestion 7PM"** — runs daily at 7:00 PM, captures pre-game/closing lines
+- Both are configured: user `rich-`, logon mode `Interactive only`, enabled.
+- The 11 AM task was verified with a live test run on 2026-07-12 (exit=0, 15 games saved).
+- Next scheduled runs: 2026-07-13 at 11:00 AM and 7:00 PM.
+- Log file: `logs/ingestion.log` — each run appends a timestamped START/END block.
+
+### FastAPI Backend
+`backend/main.py` runs a read-only FastAPI app on port 8000. All endpoints
+read from PostgreSQL. CORS is enabled for `http://localhost:3000`.
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /health` | Returns `{"status": "ok"}` |
+| `GET /research/today` | Full research payload for today's games (single call for all data) |
+| `GET /research/date/{date}` | Same payload for any historically stored date |
+| `GET /research/available-dates` | All distinct stored game dates, newest first |
+| `GET /game/{game_id}` | Full research detail for a single game |
+| `GET /games/today` | Raw game list (no research data) |
+| `GET /odds/movement` | Line movement with optional filters |
+| `GET /teams` | All 30 MLB teams |
+
+The `/research/*` endpoints return per-game objects with:
+- Game metadata (id, date, time, status, teams, pitchers, records)
+- `odds[]` — latest moneyline per sportsbook + implied probability
+- `line_movement[]` — opening vs latest per sportsbook/side, with delta
+- `away_team_form` / `home_team_form` — last-10 record + run differential
+- `away_team_streak` / `home_team_streak` — current win/loss streak
+- `away_team_splits` / `home_team_splits` — road record / home record
+- `weather` — temperature, wind speed/direction, precipitation chance
+- `away_injuries[]` / `home_injuries[]` — player name, status, description
+- `away_bullpen` / `home_bullpen` — innings pitched last game + date
+
+### Next.js Dashboard (frontend/)
+A Next.js app (TypeScript, App Router, ESLint, no Tailwind) at `http://localhost:3000`.
+Two pages:
+
+**Homepage (`/`)**
+- Date selector (dropdown populated from `/research/available-dates`) —
+  defaults to Today, or loads any stored date; includes "Back to Today" button.
+- Ingestion Status Card — shows last run time and exit code from `logs/ingestion.log`.
+- Data Quality Card — flags missing odds, games, weather, or bullpen data.
+- Filter bar — three checkboxes: Has Injuries, Has Significant Line Movement,
+  Has Weather Context. All filters are additive (AND logic).
+- Sort — Default (game time order) or Largest Line Movement.
+- Flag Summary — shows count of flagged games (injuries / line movement / weather)
+  for the current filtered view.
+- Research Workspace — pin any game(s) to a persistent workspace (saved in
+  `localStorage`). Workspace persists across page reloads.
+  - Per-game notes textarea (up to 1000 characters, also persisted in `localStorage`).
+  - Side-by-side comparison table when 2 workspace games are selected:
+    compares research flags, records, pitchers, last-10 form, streaks,
+    splits, weather, bullpen load, injuries, moneylines, and max line move.
+- Games table — 25 columns showing all research context per game:
+  Detail (View link + Workspace button), Flags, Away/Home teams,
+  Game Time (UTC), Status, Away/Home Pitcher, Away/Home Record,
+  Away/Home Streak, Away Road Record, Home Home Record, Away/Home Last 10,
+  Bet365 Moneyline, Bet365 Implied Prob, DraftKings Moneyline,
+  DraftKings Implied Prob, Weather, Away Injuries, Home Injuries,
+  Away Bullpen, Home Bullpen.
+- Line Movement table — all movement rows for the current filtered/sorted view:
+  opening ML, latest ML, delta (color-coded green/red), timestamps.
+- Research Flags on each game row (emoji badges: ⚠ injuries, 📈 line movement,
+  🌬 weather).
+
+**Game Detail (`/game/[game_id]`)**
+- Dedicated research view for a single game.
+- Shows full matchup: pitchers, records, streaks, splits, form, weather,
+  injuries, bullpen, odds, and line movement for that game only.
+- Linked from the games table "View" column and from the workspace.
+
+### Shared Frontend Logic (frontend/lib/)
+- `gameFilters.ts` — `applyFilters()` applies the three checkbox filters;
+  exports `LINE_MOVE_THRESHOLD` constant (used by flags and filters to
+  define "significant" movement).
+- `gameFlags.ts` — `getGameFlags()` derives emoji flag badges from a game object.
+- `gameFlagSummary.ts` — `getGameFlagSummary()` counts flagged games across
+  the full displayed list.
+
+### Components (frontend/components/)
+- `ResearchFlags.tsx` — reusable badge renderer used in both the game table
+  and the comparison view.
+
+### Frontend Components (frontend/app/components/)
+- `IngestionStatusCard.tsx` — reads `/health/ingestion` (or similar) and
+  shows last run time + status.
+- `DataQualityCard.tsx` — reads `/health/data-quality` and shows data
+  completeness warnings.
+
+### Test Coverage
+- **Backend** — 44 pytest tests across 7 modules:
+  `test_research_endpoints.py`, `test_weather.py`, `test_injuries.py`,
+  `test_bullpen.py`, `test_data_quality.py`, `test_game_detail.py`,
+  `test_health_ingestion.py`. All pass. Tests hit real local PostgreSQL — no mocks.
+- **Frontend** — 34 Vitest tests across 3 modules:
+  `gameFilters.test.ts`, `gameFlags.test.ts`, `gameFlagSummary.test.ts`. All pass.
 
 ---
 
 ## 2. What Has Been Verified With Real Live Data
 
-All of the items below have been **run for real** — either against live
-data, a real local database, or both — not just written and assumed to
-work.
-
-- ✅ `backend/test_mlb_stats_api.py` — printed 15 real MLB games for the day,
-  plus team standings (wins/losses), with no API key required.
-- ✅ `backend/test_odds_api.py` — printed real moneyline odds for real MLB
-  games, from two real sportsbooks (Bet365 and DraftKings). Example of what
-  it printed:
-
-  ```
-  NY Yankees @ Cleveland  (2026-06-10T17:10:00Z)
-    Bet365       NY Yankees: 1.95 (-105)    Cleveland: 1.86 (-116)
-    DraftKings   NY Yankees: 1.98 (-102)    Cleveland: 1.84 (-119)
-  ```
-
-- ✅ `backend/test_odds_fetcher.py` — confirmed `fetchers/odds_api_io.py`
-  returns the same live odds, but reshaped into the project's standard
-  format (clean field names, American + decimal odds, a `recorded_at`
-  timestamp). Example of what it printed:
-
-  ```
-  NY Yankees @ Cleveland   2026-06-10T17:10:00Z
-    Sportsbook: Bet365
-    Away ML: 1.95 (-105)
-    Home ML: 1.86 (-116)
-    event_id: 63303615
-    recorded_at: 2026-06-10T07:24:55Z
-  ```
-
-- ✅ `backend/scripts/test_db_connection.py` — connected to the local
-  PostgreSQL database and printed the server's current time, confirming
-  `DATABASE_URL` in `backend/.env` is correct.
-
-- ✅ `backend/scripts/save_live_data.py` — fetched real live data and saved
-  it into the `mlb_betting_edge` database:
-  - **30 teams** saved to `teams`
-  - **15 games** saved to `games` (for 2026-06-12)
-  - **14 odds rows** saved to `odds_history`, from Bet365 and DraftKings
-
-The PostgreSQL database is fully set up and working end to end.
-
-- ✅ FastAPI backend — started with `uvicorn` and tested live against the
-  real `mlb_betting_edge` database:
-  - `GET /health` → `{"status": "ok"}`
-  - `GET /games/today` → 10 games for 2026-06-12
-  - `GET /odds/latest` → 28 odds rows (14 `odds_history` rows × home/away)
-  - `GET /teams` → 30 teams
-
-The FastAPI backend is fully working and read-only.
-
-- ✅ `/games/today` UTC-date fix — `backend/routers/games.py` now filters
-  on `datetime.now(timezone.utc).date()` instead of `date.today()`.
-  Re-tested with `uvicorn --reload` (after also fixing `.env` loading in
-  `backend/db.py` — see section 5): still returns 10 games for
-  2026-06-12, and `/health`, `/teams`, and `/odds/latest` all still work.
-
-- ✅ **Dashboard MVP — full stack, end to end (2026-06-15).** With FastAPI
-  running on port 8000 and `npm run dev` running on port 3000:
-  - Ran `backend/scripts/save_live_data.py` — saved 10 games + 13 odds
-    rows for 2026-06-15.
-  - `GET /games/today` returned 4 games for 2026-06-15 (the other 6 of
-    the 10 saved had `game_date = 2026-06-16` — a UTC rollover bug, fixed
-    later the same day, see "Game Dates Normalized to MLB Schedule Date"
-    in section 5).
-  - Opened `http://localhost:3000` in a real browser (headless Chromium
-    via Playwright): the homepage showed "MLB Betting Edge" /
-    "Today's MLB Games" and a table with all 4 games (Away Team, Home
-    Team, Game Time in UTC, Status), no console errors.
-  - Also confirmed the **empty state** ("No games scheduled for today.")
-    by loading the page before `save_live_data.py` had been run for
-    2026-06-15 (when `/games/today` returned `[]`).
-  - **Update (later on 2026-06-15):** after the game date normalization
-    fix and re-running `save_live_data.py`, `GET /games/today` returns
-    all **10** games for 2026-06-15, and the dashboard table shows all 10
-    rows. See section 5 for details.
-
-- ✅ **`GET /odds/today` added and tested live (2026-06-15).** Returns the
-  latest saved moneyline odds for today's games only, one row per
-  game/sportsbook (using `DISTINCT ON (game_id, sportsbook) ... ORDER BY
-  recorded_at DESC`, same pattern as `/odds/latest`). Read-only, no new
-  tables or columns.
-  - Returned **13 rows** covering **7 of the 10** games for 2026-06-15
-    (the other 3 games don't have odds posted yet — normal, see section
-    5's OddsAPI.io note).
-  - Sportsbook breakdown: **7 Bet365** rows, **6 DraftKings** rows (one
-    game has only a Bet365 line so far).
-  - Example response row:
-    ```json
-    {
-      "game_id": 16,
-      "game_date": "2026-06-15",
-      "game_time": "22:40",
-      "sportsbook": "Bet365",
-      "away_team": "MIA",
-      "home_team": "PHI",
-      "away_moneyline": 175,
-      "home_moneyline": -213,
-      "recorded_at": "2026-06-15T02:39:20-04:00"
-    }
-    ```
-  - No frontend changes — this is backend-only, not wired into the
-    dashboard yet.
-
-- ✅ **`GET /games/today-with-odds` added and tested live (2026-06-15).**
-  Combines `/games/today` and `/odds/today`'s query patterns into one
-  endpoint: today's games, each with an `odds` array of the latest
-  moneyline per sportsbook (same `DISTINCT ON (game_id, sportsbook)
-  ... ORDER BY recorded_at DESC` logic). Read-only, no new tables or
-  columns.
-  - Returned **10 games** (matches `/games/today`), with **13 odds rows**
-    total spread across **7 games** (3 games have `"odds": []`) — matches
-    a direct PostgreSQL query of the same data.
-  - No duplicate sportsbook entries within any game's `odds` array.
-  - Example response (one game with odds, one without):
-    ```json
-    [
-      {
-        "game_id": 16,
-        "game_date": "2026-06-15",
-        "game_time": "22:40",
-        "away_team": "MIA",
-        "home_team": "PHI",
-        "status": "scheduled",
-        "odds": [
-          {
-            "sportsbook": "Bet365",
-            "away_moneyline": 175,
-            "away_implied_probability": 36.36,
-            "home_moneyline": -213,
-            "home_implied_probability": 68.05,
-            "recorded_at": "2026-06-15T02:39:20-04:00"
-          },
-          {
-            "sportsbook": "DraftKings",
-            "away_moneyline": 177,
-            "away_implied_probability": 36.1,
-            "home_moneyline": -217,
-            "home_implied_probability": 68.45,
-            "recorded_at": "2026-06-15T02:39:20-04:00"
-          }
-        ]
-      },
-      {
-        "game_id": 17,
-        "game_date": "2026-06-15",
-        "game_time": "22:45",
-        "away_team": "KC",
-        "home_team": "WSH",
-        "status": "scheduled",
-        "odds": []
-      }
-    ]
-    ```
-  - No frontend changes — backend-only, not wired into the dashboard yet.
-
-- ✅ **Implied probability added to `/games/today-with-odds` (2026-06-15).**
-  New small utility `backend/odds_math.py` —
-  `american_odds_to_implied_probability(odds)` converts an American
-  moneyline to an implied probability percentage, rounded to 2 decimals:
-  - Negative odds: `abs(odds) / (abs(odds) + 100) * 100`
-  - Positive odds: `100 / (odds + 100) * 100`
-
-  Each odds entry in `/games/today-with-odds` now includes
-  `away_implied_probability` and `home_implied_probability` alongside the
-  existing moneylines. Read-only — no edge calculations, no picks, no
-  schema changes.
-  - Verified against known examples: `-110` → `52.38`, `-120` → `54.55`,
-    `+100` → `50.00`, `+150` → `40.00` — all matched.
-  - Verified live: all **13 odds rows** across **10 games** from
-    `/games/today-with-odds` matched a manual recalculation of implied
-    probability from their moneylines (0 mismatches).
-  - Example odds entry:
-    ```json
-    {
-      "sportsbook": "Bet365",
-      "away_moneyline": 175,
-      "away_implied_probability": 36.36,
-      "home_moneyline": -213,
-      "home_implied_probability": 68.05,
-      "recorded_at": "2026-06-15T02:39:20-04:00"
-    }
-    ```
-  - No frontend changes.
-
-- ✅ **Dashboard now shows odds and implied probability (2026-06-15).**
-  `frontend/app/page.tsx` now fetches `GET /games/today-with-odds` instead
-  of `GET /games/today`. The table keeps the existing Away Team, Home
-  Team, Game Time, Status columns and adds four more: Bet365 Moneyline,
-  Bet365 Implied Prob, DraftKings Moneyline, DraftKings Implied Prob. Each
-  odds cell shows `"Away / Home"` (e.g. `+175 / -213` or `36.36% / 68.05%`).
-  If a sportsbook has no odds for a game, both of its columns show `"-"`
-  and the game row still renders.
-  - No backend, schema, or styling-framework changes — same plain
-    `<table>` with the existing `cellStyle`, no Tailwind.
-  - Verified: `npx tsc --noEmit` passes with no type errors; homepage
-    returns HTTP 200 with no error overlay.
-  - Verified all **10 games** render with correct values by replaying the
-    page's exact formatting logic (`findOdds`, `formatMoneyline`,
-    `formatProbability`) against the live `/games/today-with-odds`
-    response — output matched the API for all 10 rows, including the 4
-    games with one or both sportsbooks missing (shown as `"-"`):
-
-    ```
-     MIA @ PHI  | 22:40 | scheduled  | Bet365 +175 / -213  36.36% / 68.05% | DK +177 / -217  36.10% / 68.45%
-      KC @ WSH  | 22:45 | scheduled  | Bet365 -            -               | DK -            -
-     NYM @ CIN  | 23:10 | scheduled  | Bet365 +115 / -135  46.51% / 57.45% | DK +114 / -139  46.73% / 58.16%
-      SD @ STL  | 23:45 | scheduled  | Bet365 -            -               | DK -            -
-     COL @ CHC  | 00:05 | scheduled  | Bet365 +165 / -200  37.74% / 66.67% | DK +169 / -208  37.17% / 67.53%
-     MIN @ TEX  | 00:05 | scheduled  | Bet365 +140 / -167  41.67% / 62.55% | DK -            -
-     DET @ HOU  | 00:10 | scheduled  | Bet365 +110 / -132  47.62% / 56.90% | DK +109 / -133  47.85% / 57.08%
-     LAA @ AZ   | 01:40 | scheduled  | Bet365 +110 / -132  47.62% / 56.90% | DK +108 / -132  48.08% / 56.90%
-     PIT @ ATH  | 01:40 | scheduled  | Bet365 +110 / -132  47.62% / 56.90% | DK +108 / -132  48.08% / 56.90%
-      TB @ LAD  | 02:10 | scheduled  | Bet365 -            -               | DK -            -
-    ```
-  - No headless browser was available in this environment to capture a
-    visual screenshot — verification was done via the checks above
-    instead.
-
-- ✅ **`starting_pitchers` and `team_records` now populated (2026-06-15).**
-  Both fetchers already returned this data — `get_todays_games()` already
-  hydrates `probablePitcher` (home/away pitcher names), and
-  `get_team_records()` already returns full win/loss splits for all 30
-  teams. No new API calls or fields were needed; `save_live_data.py` just
-  wasn't saving them yet. Two small functions added, both following the
-  existing UPSERT pattern from `save_games`:
-  - `save_starting_pitchers(cur, saved_games)` — one row per game,
-    `ON CONFLICT (game_id) DO UPDATE`.
-  - `save_team_records(cur, records)` — one row per team/season,
-    `ON CONFLICT (team_id, season) DO UPDATE`, reusing `get_or_create_team`.
-
-  No schema changes — both tables already existed with the right columns
-  and unique constraints.
-
-  **Verified live (2026-06-15):**
-  - `starting_pitchers`: **10 rows** (one per today's game), **10/10**
-    games have at least one probable pitcher announced. 2 games
-    (SD@STL, MIN@TEX) have the away pitcher still `null` ("TBD" from MLB).
-  - `team_records`: **30 rows** (one per team), all 30 teams have
-    non-null win/loss + home/away splits for season 2026.
-  - Example `starting_pitchers` row (MIA @ PHI):
-    ```
-    game_id=16, away_pitcher="Ryan Gusto", home_pitcher="Zack Wheeler"
-    ```
-  - Example `starting_pitchers` row with one pitcher not yet announced
-    (SD @ STL):
-    ```
-    game_id=19, away_pitcher=null, home_pitcher="Dustin May"
-    ```
-  - Example `team_records` row (ATH, 2026):
-    ```
-    wins=35, losses=36, home_wins=15, home_losses=19,
-    away_wins=20, away_losses=17
-    ```
-  - **Side effect (no code change):** `/games/today`'s existing
-    `probable_home_pitcher`/`probable_away_pitcher` fields, previously
-    always `null`, now return real pitcher names — the query already
-    joined `starting_pitchers`, it was just empty before.
-  - No frontend changes, no new endpoints, no edge calculations.
-
-- ✅ **`/games/today-with-odds` now includes pitchers and records
-  (2026-06-15).** `backend/routers/games.py` extended the existing
-  query — no new endpoints, tables, or fetchers:
-  - `LEFT JOIN starting_pitchers` adds `away_pitcher` / `home_pitcher`
-    (`null` if not yet announced).
-  - A new `SELECT DISTINCT ON (team_id) ... ORDER BY team_id, season DESC`
-    query against `team_records` gives each team's latest win/loss
-    record, formatted as `"wins-losses"` (e.g. `"36-36"`), added as
-    `away_record` / `home_record`.
-  - The `odds` array's shape and contents are unchanged.
-
-  **Verified live (2026-06-15):**
-  - **10 games** returned (game_ids 16–25).
-  - 0 mismatches against a direct PostgreSQL query joining
-    `starting_pitchers` and `team_records` for the same fields.
-  - Both teams have a `*_record` value for all 10 games.
-  - `away_pitcher` is `null` for 2 games (SD@STL, MIN@TEX — MLB hasn't
-    announced those starters yet); all other pitcher fields populated.
-  - Odds output unchanged: 14 odds rows across 7 games, implied
-    probabilities still correct (e.g. Bet365 away `+180` → `35.71%`).
-  - Example response (one game with full odds):
-    ```json
-    {
-      "game_id": 16,
-      "game_date": "2026-06-15",
-      "game_time": "22:40",
-      "away_team": "MIA",
-      "home_team": "PHI",
-      "away_pitcher": "Ryan Gusto",
-      "home_pitcher": "Zack Wheeler",
-      "away_record": "36-36",
-      "home_record": "38-33",
-      "status": "scheduled",
-      "odds": [
-        {
-          "sportsbook": "Bet365",
-          "away_moneyline": 180,
-          "away_implied_probability": 35.71,
-          "home_moneyline": -222,
-          "home_implied_probability": 68.94,
-          "recorded_at": "2026-06-15T03:41:04-04:00"
-        },
-        {
-          "sportsbook": "DraftKings",
-          "away_moneyline": 177,
-          "away_implied_probability": 36.1,
-          "home_moneyline": -217,
-          "home_implied_probability": 68.45,
-          "recorded_at": "2026-06-15T03:41:04-04:00"
-        }
-      ]
-    }
-    ```
-  - No frontend changes, no schema changes, no ingestion changes.
-
-- ✅ **Dashboard now shows pitchers and records (2026-06-15).**
-  `frontend/app/page.tsx` adds four columns to the existing table — Away
-  Pitcher, Home Pitcher, Away Record, Home Record — placed right after the
-  Status column and before the odds columns. Each value comes straight
-  from the `/games/today-with-odds` response; a `null` pitcher renders as
-  `"-"`. Same layout, no Tailwind, no charts.
-  - Verified: `npx tsc --noEmit` passes with no type errors.
-  - Verified live with a headless Chrome render of `http://localhost:3000`
-    (with the FastAPI backend running): the table rendered **11 `<tr>`
-    elements** (1 header + 10 games). Parsed every row and compared the
-    Away Team, Home Team, Away Pitcher, Home Pitcher, Away Record, and
-    Home Record cells against the live `/games/today-with-odds` response
-    — **0 mismatches** across all 10 games.
-  - Confirmed the `null` → `"-"` fallback: games 19 (SD@STL) and 21
-    (MIN@TEX) have `away_pitcher: null` in the API response, and both
-    rendered `"-"` in the Away Pitcher cell.
-  - No backend, schema, or ingestion changes.
+- ✅ MLB Stats API — games, pitchers, team records fetched and saved live.
+- ✅ OddsAPI.io — Bet365 + DraftKings moneyline odds fetched and saved live.
+- ✅ ESPN injury feed — injury reports parsed and saved live.
+- ✅ Open-Meteo weather — temperature, wind, precipitation fetched per stadium.
+- ✅ Bullpen context — innings from previous game computed per team.
+- ✅ PostgreSQL end-to-end — all 5 tables populated via `save_live_data.py`.
+- ✅ FastAPI backend — all endpoints tested against real data.
+- ✅ Dashboard — homepage renders all 25 columns correctly with live data.
+- ✅ Game detail page — renders full research context for a single game.
+- ✅ Research workspace — add/remove games, notes persist in localStorage.
+- ✅ Comparison view — side-by-side table renders correctly for 2 workspace games.
+- ✅ Research flags — injury/line movement/weather badges appear on correct games.
+- ✅ Filters and sort — checkboxes and sort dropdown filter/reorder the game list correctly.
+- ✅ Date selector — dropdown populates from API, historical dates load correctly.
+- ✅ Task Scheduler — `schtasks /run` test on 2026-07-12 produced exit=0, 15 games saved,
+  log entry written correctly; next scheduled run confirmed for 2026-07-13 11:00 AM.
+- ✅ All 78 automated tests pass (44 backend + 34 frontend).
+- ✅ TypeScript passes with 0 errors.
+- ✅ ESLint passes with 0 warnings.
 
 ---
 
@@ -406,419 +158,246 @@ The FastAPI backend is fully working and read-only.
 
 ```
 mlb-betting-edge/
-├── README.md                      Project overview
-├── PROJECT_PLAN.md                The roadmap / checklist (most up-to-date status)
-├── MVP_PLAN.md                    What "Version 1" includes and excludes
-├── CLAUDE.md                      Instructions for how Claude should work on this project
-├── CURRENT_STATUS.md              This file — checkpoint/save point
-├── SETUP_GUIDE.md                 How SportsDataIO API keys work (provider is paused)
-├── .env.example                   Template showing which secret keys are needed
-├── .gitignore                     Tells Git to never save secrets (.env files)
+├── README.md
+├── PROJECT_PLAN.md
+├── MVP_PLAN.md
+├── CLAUDE.md
+├── CURRENT_STATUS.md              (this file)
+├── PROJECT_STATUS.md
+├── APP_ARCHITECTURE.md
+├── SETUP_GUIDE.md
+├── POSTGRES_SETUP.md
+├── requirements.txt
+├── .env.example
+├── .gitignore
+│
+├── logs/
+│   └── ingestion.log              Appended by run_ingestion.bat each run
 │
 ├── backend/
-│   ├── README.md                  Explains the backend setup and data sources
-│   ├── requirements.txt           Python packages — now includes fastapi, uvicorn
-│   ├── .env                       Your real, private API keys + DATABASE_URL
-│   ├── __init__.py                Makes "backend" importable for uvicorn
-│   ├── main.py                    FastAPI app — wires up routers + /health
-│   ├── db.py                      get_db_connection() using psycopg2 + DATABASE_URL
+│   ├── .env                       DATABASE_URL + ODDS_API_KEY (not committed)
+│   ├── main.py                    FastAPI app entry point
+│   ├── db.py                      get_db_connection() — explicit .env path
 │   ├── odds_math.py               american_odds_to_implied_probability()
-│   ├── test_mlb_stats_api.py      Test script — prints live MLB games/standings
-│   ├── test_odds_api.py           Test script — raw OddsAPI.io connection check
-│   ├── test_odds_fetcher.py       Test script — prints standardized odds data
 │   ├── fetchers/
-│   │   ├── __init__.py            Makes "fetchers" a Python package
-│   │   ├── mlb_stats_api.py       ACTIVE — fetches games/pitchers/records (free)
-│   │   ├── odds_api_io.py         ACTIVE — fetches moneyline odds (needs API key)
-│   │   └── sportsdataio.py        PAUSED — kept ready, not used right now
+│   │   ├── mlb_stats_api.py       Games, pitchers, records, bullpen (free)
+│   │   ├── odds_api_io.py         Moneyline odds — Bet365 + DraftKings
+│   │   ├── injuries.py            ESPN injury feed (free)
+│   │   ├── weather.py             Open-Meteo weather + stadium coordinates (free)
+│   │   └── sportsdataio.py        PAUSED — kept ready, not used
 │   ├── routers/
-│   │   ├── __init__.py            Makes "routers" a Python package
-│   │   ├── games.py               GET /games/today, GET /games/today-with-odds
-│   │   ├── odds.py                GET /odds/latest, GET /odds/today
-│   │   └── teams.py               GET /teams
-│   └── scripts/
-│       ├── test_db_connection.py  Connects to PostgreSQL, runs SELECT NOW()
-│       └── save_live_data.py      Saves today's games + odds into PostgreSQL
+│   │   ├── games.py               /games/today, /game/{id}
+│   │   ├── odds.py                /odds/latest, /odds/today, /odds/movement
+│   │   ├── research.py            /research/today, /research/date/{date},
+│   │   │                          /research/available-dates
+│   │   ├── health.py              /health, /health/ingestion, /health/data-quality
+│   │   └── teams.py               /teams
+│   ├── scripts/
+│   │   ├── save_live_data.py      Daily ingestion (accepts --date flag)
+│   │   └── run_ingestion.bat      Task Scheduler wrapper — writes to logs/ingestion.log
+│   └── tests/
+│       ├── test_research_endpoints.py
+│       ├── test_weather.py
+│       ├── test_injuries.py
+│       ├── test_bullpen.py
+│       ├── test_data_quality.py
+│       ├── test_game_detail.py
+│       └── test_health_ingestion.py
 │
 ├── database/
-│   ├── README.md                  Explains each database table in plain language
-│   └── schema.sql                 The 5-table schema — installed in mlb_betting_edge
+│   ├── README.md
+│   └── schema.sql                 5-table schema
 │
 ├── docs/
-│   ├── README.md                  Notes on data sources and API endpoints
-│   ├── ODDS_PROVIDER_RESEARCH.md  Comparison of odds providers + recommendation
-│   └── ODDS_API_SETUP.md          Step-by-step OddsAPI.io account/key setup
+│   ├── ODDS_PROVIDER_RESEARCH.md
+│   └── ODDS_API_SETUP.md
 │
-└── frontend/                      Next.js 16 app (TypeScript, App Router, ESLint)
-    ├── README.md                  Explains the frontend setup
-    ├── .env.local                 NEXT_PUBLIC_API_URL=http://localhost:8000 (not committed)
-    ├── package.json               Node.js package list
-    ├── AGENTS.md / CLAUDE.md      Auto-generated by create-next-app — notes on
-    │                              Next.js 16 conventions for AI coding assistants
+└── frontend/                      Next.js app (TypeScript, App Router, ESLint)
+    ├── .env.local                 NEXT_PUBLIC_API_URL=http://localhost:8000
+    ├── package.json
+    ├── components/
+    │   └── ResearchFlags.tsx      Reusable emoji flag badge renderer
+    ├── lib/
+    │   ├── gameFilters.ts         applyFilters() + LINE_MOVE_THRESHOLD
+    │   ├── gameFilters.test.ts
+    │   ├── gameFlags.ts           getGameFlags()
+    │   ├── gameFlags.test.ts
+    │   ├── gameFlagSummary.ts     getGameFlagSummary()
+    │   └── gameFlagSummary.test.ts
     └── app/
-        ├── layout.tsx             Root layout — page title "MLB Betting Edge"
-        ├── page.tsx               Homepage — fetches /games/today-with-odds,
-        │                          shows games + pitchers + records +
-        │                          Bet365/DraftKings odds table
-        └── globals.css            Global styles (plain CSS, no Tailwind)
+        ├── layout.tsx
+        ├── page.tsx               Homepage (all dashboard features)
+        ├── globals.css
+        ├── components/
+        │   ├── IngestionStatusCard.tsx
+        │   └── DataQualityCard.tsx
+        └── game/
+            └── [game_id]/
+                └── page.tsx       Game detail research view
 ```
-
-A git repository was also initialized at the project root (`git init`) — no
-commits made yet, `.gitignore` was already in place.
 
 ---
 
 ## 4. What APIs Are Active
 
-| API | Status | API Key Needed? | What It's Used For |
+| API | Status | Key Needed? | What It Provides |
 |---|---|---|---|
-| **MLB Stats API** (statsapi.mlb.com) | ✅ Active | No | Today's games, scores, starting pitchers, team records |
-| **OddsAPI.io** (odds-api.io) | ✅ Active | Yes (in `backend/.env`) | Moneyline odds (who's favored, by how much) |
-| **SportsDataIO** | ⏸ Paused | Yes (placeholder only) | Not used. Code is ready in `backend/fetchers/sportsdataio.py` if needed later. |
+| MLB Stats API (statsapi.mlb.com) | ✅ Active | No | Games, pitchers, records, bullpen |
+| OddsAPI.io (odds-api.io) | ✅ Active | Yes (`backend/.env`) | Bet365 + DraftKings moneylines |
+| ESPN (site.api.espn.com) | ✅ Active | No | Injury reports |
+| Open-Meteo (api.open-meteo.com) | ✅ Active | No | Stadium weather |
+| SportsDataIO | ⏸ Paused | Yes (placeholder) | Not used |
 
 ---
 
-## 5. API Quirks We Discovered
+## 5. Known Issues and Quirks
 
-These are things that **weren't obvious from the docs** and took some
-trial-and-error to figure out. Worth remembering so we don't waste time
-re-discovering them later.
+### Injury Team Mapping
+The ESPN injury feed returns team names that don't always match the
+abbreviations used in the `teams` table. As a result, most injury rows are
+currently skipped with "unknown team" in the log (e.g., `283 skipped`).
+Injuries show as empty in the dashboard for affected teams. This is a known
+gap — the injury data fetcher works, but the team-name-to-abbreviation
+mapping is incomplete.
 
-### MLB Stats API
-- Player names with accents (like "Julio Rodríguez") need a small fix —
-  `sys.stdout.reconfigure(encoding="utf-8")` — or Windows terminals show
-  garbled characters.
+### OddsAPI.io Free Tier Constraints
+- Sport slug is `baseball`, league is `usa-mlb` — not `sport=mlb`.
+- Requires a `bookmakers` parameter.
+- Free plan is locked to the first 2 sportsbooks requested: **Bet365** and **DraftKings**.
+- Not every game has odds posted; some games show no odds closer to game time —
+  this is normal, not a bug.
+- Bookmaker names are case-sensitive: `"Bet365"` works, `"bet365"` does not.
 
-### OddsAPI.io
-- The sport is called `baseball`, **not** `mlb`. MLB is a *league* inside
-  the `baseball` sport, with the slug `usa-mlb`.
-  - Correct: `sport=baseball&league=usa-mlb`
-  - Wrong: `sport=mlb` (returns an error)
-- Getting odds for a game **requires** a `bookmakers` parameter — you must
-  say which sportsbook(s) you want odds from.
-- The free plan only allows **2 sportsbooks total**, and it locks in the
-  first 2 you ask for. This account is locked to **Bet365** and
-  **DraftKings**. (There's a way to reset this if we ever needed different
-  books, but we don't need to.)
-- Bookmaker names are **case-sensitive** — `"Bet365"` works, `"bet365"`
-  does not.
-- The odds data comes back as a "dictionary" (a labeled box) where each
-  sportsbook name points to a list of betting markets — not a simple list.
-- Not every game has odds posted yet, even if the game is upcoming. Some
-  games show "no odds posted yet" — that's normal, not a bug. Sportsbooks
-  post lines closer to game time.
+### Open-Meteo Occasional 503s
+Open-Meteo sometimes returns 503 (Service Unavailable) for individual
+stadium lookups. The ingestion script logs these failures and skips those
+games, but exits with code 0. Affected games show "Weather unavailable" in
+the dashboard. These are transient — the next run typically succeeds.
 
-### PostgreSQL / Local Setup
+### Game Dates Are MLB Schedule Dates (Not UTC)
+`game_date` in the database is the MLB schedule date (US-local), not the UTC
+date. Night games starting after ~8 PM ET fall after midnight UTC, so
+their raw `gameDate` from the API would be the next calendar day — but the
+ingestion script corrects this by reading the schedule's `dates[].date`
+field. The `/games/today` endpoint filters on UTC date, which matches the
+schedule date for most of the day but may not match for a brief window
+right after midnight UTC (roughly 8–11 PM ET). Not a problem in practice.
 
-- The `psycopg2-binary` version originally pinned in `requirements.txt`
-  (2.9.9) has no prebuilt Windows wheel for Python 3.13 — installing it
-  tries to compile from source and fails without Microsoft C++ Build
-  Tools. Fixed by using `psycopg2-binary==2.9.12`, which has a `cp313`
-  wheel.
-- The MLB Stats API uses the abbreviation **`AZ`** for the Arizona
-  Diamondbacks, not `ARI`. The team name lookup in
-  `backend/scripts/save_live_data.py` was written with `ARI` first, which
-  caused Arizona to be saved with a placeholder name — fixed by using `AZ`.
+### Task Scheduler — Interactive Only
+Both scheduled tasks run in `Interactive only` logon mode, meaning they
+require an active user session. If the PC is asleep or logged out at
+11 AM or 7 PM, the task will not run for that day. This is expected for a
+local-only setup.
 
-### Game Dates Are UTC, Not Local — FIXED (2026-06-12)
-
-- `games.game_date` comes from the MLB Stats API's `gameDate` field, which
-  is a UTC timestamp split into date + time. Night games starting after
-  about 8 PM ET fall after midnight UTC, so their `game_date` ends up as
-  the *next* calendar day.
-- Example: of the 15 games saved for 2026-06-12, 10 have
-  `game_date = 2026-06-12` and 5 have `game_date = 2026-06-13`.
-- `/games/today` used to filter on `date.today()` (the server's local
-  date), which could disagree with `game_date` depending on the time of
-  day and the server's timezone.
-- **Fix:** `backend/routers/games.py` now filters on
-  `datetime.now(timezone.utc).date()` — an explicit UTC date, matching how
-  `game_date` itself is computed. "Today" in the API is now consistent no
-  matter what timezone the server runs in.
-- This does **not** change which games are grouped together — the 5
-  late-night games still have `game_date` one day ahead. That's a deeper
-  "schedule date vs. UTC date" question to revisit later if it matters for
-  the dashboard.
-
-### Game Dates Normalized to MLB Schedule Date — FIXED (2026-06-15)
-
-The fix above only changed *which* UTC date `/games/today` compared
-against — it didn't change how `game_date` itself was computed, so a
-single MLB schedule day could still be split across two different
-`game_date` values in the database.
-
-**Root cause:** The MLB Stats API's `/schedule` response groups all of a
-day's games under `dates[].date` (the schedule date, e.g. `"2026-06-15"`),
-but each game's own `gameDate` field is a UTC start timestamp. Night games
-starting around 8 PM ET or later cross midnight UTC and land on the *next*
-calendar day. The old `_normalize_game()` set `game_date` by splitting
-`gameDate` on `"T"` (the UTC date) instead of using the schedule date.
-
-**Example — the 2026-06-15 slate (10 games total):**
-- 4 games kept `game_date = 2026-06-15` (gameDate also UTC `06-15`):
-  MIA@PHI, KC@WSH, NYM@CIN, SD@STL
-- 6 games were saved with `game_date = 2026-06-16` (gameDate UTC `06-16`,
-  e.g. `2026-06-16T01:40:00Z`), even though MLB schedules them as part of
-  the same 2026-06-15 slate: COL@CHC, MIN@TEX, DET@HOU, LAA@AZ, PIT@ATH,
-  TB@LAD
-
-That 4/6 split is exactly why `/games/today` only returned 4 games earlier
-on 2026-06-15 (see the Dashboard MVP entry in section 2).
-
-**Fix (ingestion only — no frontend changes):**
-- `backend/fetchers/mlb_stats_api.py` — `get_todays_games()` now reads
-  `schedule_date = dates[].date` for each date group and passes it into
-  `_normalize_game()`, which uses it as `game_date`. `game_time` still
-  comes from `gameDate`'s UTC time-of-day (unchanged).
-- `backend/scripts/save_live_data.py`:
-  - `save_games()`'s `ON CONFLICT (external_game_id) DO UPDATE SET` now
-    also updates `game_date` and `game_time`, so re-running the script
-    corrects rows that were already saved with the old, wrong `game_date`.
-  - `find_matching_game()` now matches an odds record if its UTC date
-    equals either the game's `game_date` or `game_date + 1 day`, since
-    `game_date` is now the schedule date but OddsAPI.io's event dates are
-    still UTC-based.
-
-**Verification (2026-06-15):**
-- Before: `games` table had 4 rows with `game_date = 2026-06-15` and 6
-  rows with `game_date = 2026-06-16` for this slate.
-- Re-ran `python scripts/save_live_data.py` → `Saved 10 games`,
-  `Saved 13 odds rows` (all 13 matched a game, none skipped).
-- After: all 10 rows for this slate now have `game_date = 2026-06-15`;
-  `game_date = 2026-06-16` no longer appears for this slate.
-- `GET /games/today` now returns all **10** games for 2026-06-15.
-- Dashboard (`http://localhost:3000`) now shows all 10 rows in the games
-  table (checked with a headless browser).
-
-**Remaining known issue:** `/games/today` (`backend/routers/games.py`)
-still filters on `datetime.now(timezone.utc).date()`. `game_date` is now
-the MLB *schedule* date, which is US-centric. For a window right after UTC
-midnight (roughly 8 PM–midnight US Eastern), the UTC date is already one
-day ahead of the current MLB schedule date, so `/games/today` could
-return 0 games even though that schedule day's games are still in
-progress. Not addressed here since this fix was scoped to ingestion
-only — revisit `backend/routers/games.py` if this becomes a problem.
-
-### CORS Had To Be Enabled For The Dashboard (2026-06-15)
-
-- The browser blocked the Next.js dashboard's `fetch("/games/today")`
-  call with a CORS error ("No 'Access-Control-Allow-Origin' header"),
-  even though `curl` worked fine — browsers enforce CORS, command-line
-  tools don't.
-- **Fix:** `backend/main.py` now adds `CORSMiddleware`, allowing GET
-  requests from `http://localhost:3000`.
-
-### `/games/today` Now Returns `game_time` (2026-06-15)
-
-- The `games` table already had a `game_time` column (`"HH:MM"`, UTC),
-  but `backend/routers/games.py` wasn't selecting or returning it.
-- The dashboard needs a "Game Time" column, so the SELECT and the
-  response dict in `backend/routers/games.py` now include `game_time`.
-  This is not a schema change — the column already existed and was
-  already being saved by `save_live_data.py`.
-
-### .env Loading Fixed for `--reload` Mode
-
-- `backend/db.py` called `load_dotenv()` with no path. This worked when
-  running uvicorn normally, but failed (`DATABASE_URL` came back `None`,
-  causing "no password supplied" errors) when running
-  `uvicorn backend.main:app --reload`, because the reloader's subprocess
-  broke `python-dotenv`'s automatic file discovery.
-- **Fix:** `backend/db.py` now calls
-  `load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))` — an
-  explicit path based on the file's own location, so it works the same in
-  both normal and `--reload` mode.
+### .env Loading in Reload Mode
+`backend/db.py` uses an explicit path: `load_dotenv(os.path.join(
+os.path.dirname(__file__), ".env"))`. This is intentional — the standard
+`load_dotenv()` with no path breaks when running `uvicorn --reload` because
+the reloader subprocess changes the working directory.
 
 ---
 
 ## 6. What Is Still Not Built
 
-- ❌ Only one frontend page exists (the homepage / today's games table) —
-  no matchups, props, line movement, or parlay pages yet.
-- ❌ No write endpoints, authentication, or cloud deployment — the FastAPI
-  backend is local and read-only by design (for now).
-- ❌ No line movement *view* yet — `odds_history` now collects a new
-  snapshot each time `save_live_data.py` runs, but there's no query or
-  chart yet to look at how odds have moved over time.
+- ❌ No cloud deployment — everything runs locally (Supabase + Railway + Vercel
+  are the planned future stack, documented in CLAUDE.md; not needed yet).
+- ❌ No write endpoints or authentication.
+- ❌ Injury team mapping is incomplete — injury data is fetched but most rows
+  are currently skipped at save time due to unknown team names.
+- ❌ No prediction model, edge calculations, or betting logic.
+- ❌ No push notifications, email alerts, or mobile-optimized layout.
 
 ---
 
 ## 7. Exact Commands to Run
 
-Both commands below assume you're starting from the project root folder
-(`mlb-betting-edge/`).
+All commands assume the project root `mlb-betting-edge/` unless noted.
 
-### MLB Stats API Test (games, scores, standings — no key needed)
-
+### Run Manual Ingestion (Today)
 ```
-cd backend
-.\venv\Scripts\activate
-python test_mlb_stats_api.py
+.\backend\venv\Scripts\python.exe .\backend\scripts\save_live_data.py
 ```
 
-**What you should see:** A list of today's MLB games with teams, scores
-(if started), and starting pitchers, followed by team standings.
-
-### OddsAPI.io Test (raw connection check)
-
+### Backfill a Historical Date
 ```
-cd backend
-.\venv\Scripts\activate
-python test_odds_api.py
+.\backend\venv\Scripts\python.exe .\backend\scripts\save_live_data.py --date 2026-07-01
 ```
 
-**What you should see:** A list of upcoming MLB games, with moneyline odds
-from Bet365 and DraftKings for any games that have odds posted yet.
-
-### OddsAPI.io Fetcher Test (standardized data)
-
+### Run Backend Tests
 ```
-cd backend
-.\venv\Scripts\activate
-python test_odds_fetcher.py
-```
-
-**What you should see:** The same live odds, but reshaped into the
-project's standard format — clean field names, American + decimal odds,
-and a `recorded_at` timestamp. This is the format the database will
-eventually store.
-
-> If you ever see "API key not set" or "401 Unauthorized," check that
-> `backend/.env` has a real `ODDS_API_KEY` value (see
-> `docs/ODDS_API_SETUP.md`).
-
-### Database Connection Test
-
-```
-cd backend
-.\venv\Scripts\activate
-python scripts/test_db_connection.py
-```
-
-**What you should see:** `SUCCESS: Connected to PostgreSQL` plus the
-database server's current time.
-
-### Save Live Data (games + odds → PostgreSQL)
-
-```
-cd backend
-.\venv\Scripts\activate
-python scripts/save_live_data.py
-```
-
-**What you should see:** Counts of games/odds fetched and saved, e.g.
-`Saved 15 games` and `Saved 14 odds rows`.
-
-### Check the Database Directly
-
-```
-$env:PGPASSWORD = "<your postgres password from backend/.env>"
-& "C:\Program Files\PostgreSQL\17\bin\psql.exe" -U postgres -d mlb_betting_edge -c "\dt"
-& "C:\Program Files\PostgreSQL\17\bin\psql.exe" -U postgres -d mlb_betting_edge -c "SELECT COUNT(*) FROM games;"
-& "C:\Program Files\PostgreSQL\17\bin\psql.exe" -U postgres -d mlb_betting_edge -c "SELECT COUNT(*) FROM odds_history;"
+.\backend\venv\Scripts\python.exe -m pytest backend/tests/ -v
 ```
 
 ### Run the FastAPI Backend
-
 ```
-cd C:\Users\rich-\RICH-LABS\mlb-betting-edge
 .\backend\venv\Scripts\python.exe -m uvicorn backend.main:app --reload
 ```
-
-> Note: `.\backend\venv\Scripts\activate` may be blocked by PowerShell's
-> execution policy. Calling `python.exe` directly from the venv works
-> without needing to activate it.
-
-**What you should see:** `Uvicorn running on http://127.0.0.1:8000`
-
-Then open in a browser (or use `Invoke-RestMethod` in PowerShell):
-- http://127.0.0.1:8000/health
-- http://127.0.0.1:8000/games/today
-- http://127.0.0.1:8000/odds/latest
-- http://127.0.0.1:8000/teams
+Then open: http://127.0.0.1:8000/health
 
 ### Run the Next.js Dashboard
-
 ```
 cd frontend
 npm run dev
 ```
+Then open: http://localhost:3000
+(FastAPI must also be running.)
 
-**What you should see:** `Local: http://localhost:3000`
+### Run Frontend Tests
+```
+cd frontend
+npm test
+```
 
-Open http://localhost:3000 in a browser. The FastAPI backend (above) must
-also be running, since the homepage fetches `/games/today-with-odds` from
-it.
+### Run TypeScript Check
+```
+cd frontend
+npx tsc --noEmit
+```
+
+### Check Task Scheduler Tasks
+```
+schtasks /query /tn "MLB Ingestion 11AM" /fo LIST /v
+schtasks /query /tn "MLB Ingestion 7PM" /fo LIST /v
+```
+
+### Trigger a Manual Scheduled Run (for testing)
+```
+schtasks /run /tn "MLB Ingestion 11AM"
+```
+
+### Check Database Directly
+```powershell
+$env:PGPASSWORD = "<your postgres password from backend/.env>"
+& "C:\Program Files\PostgreSQL\17\bin\psql.exe" -U postgres -d mlb_betting_edge -c "SELECT COUNT(*) FROM games;"
+& "C:\Program Files\PostgreSQL\17\bin\psql.exe" -U postgres -d mlb_betting_edge -c "SELECT COUNT(*) FROM odds_history;"
+```
 
 ---
 
-## 8. Next Recommended Step
+## 8. Daily Operational Routine
 
-**Dashboard now shows games, moneylines, implied probabilities, probable
-pitchers, and team records.**
-Possible next steps (pick one, per `CLAUDE.md` — one feature at a time):
+With automation active, the day-to-day workflow is:
 
-- Show real game times in a friendlier format (e.g. local time instead of
-  raw UTC "HH:MM").
-- Build a second page (matchups, line movement, etc.) per
-  `PROJECT_PLAN.md` Phase 3.
-- Build the line movement view (Step 7 in `PROJECT_PLAN.md`), since
-  `odds_history` already accumulates a new snapshot each time
-  `save_live_data.py` runs.
+1. Open the dashboard (`npm run dev` + `uvicorn`).
+2. Check the **Ingestion Status Card** — confirms last run time and exit code.
+3. Check the **Data Quality Card** — flags if odds, weather, or games are missing.
+4. Use filters to narrow to games with injuries, line movement, or weather context.
+5. Add interesting games to the **Research Workspace**.
+6. Use the **Comparison View** to compare two shortlisted games side by side.
+7. Use the **Game Detail** page for a full breakdown of any single game.
+8. Add notes to workspace games as needed.
+
+No manual scripts need to be run on a normal day — the 11 AM and 7 PM tasks
+handle ingestion automatically.
 
 ---
 
 ## 9. When We Need Cloud Hosting
 
-**Short answer: not yet.** Everything so far runs fine on your local PC,
-and that's exactly where it should stay for now.
+Not yet. Cloud hosting becomes necessary once we want:
+- Ingestion running 24/7 regardless of whether the PC is on
+- The dashboard accessible from other devices or shared with others
 
-### Why local is fine right now
-
-Your computer can run Python scripts, a local PostgreSQL database, and a
-local Next.js website just as well as any cloud service can — for free,
-with no setup. Cloud hosting only starts to matter once the project needs
-to do something your PC *can't* do, which is run **24/7 even when you're
-not at your computer**.
-
-### When cloud becomes necessary
-
-Right now, every script in this project only runs when **you** type a
-command. That's perfect for testing.
-
-Cloud hosting becomes necessary once we want the project to run **on its
-own, automatically, all the time** — specifically:
-
-- **Scheduled odds pulls** — automatically checking OddsAPI.io every
-  15-30 minutes, 24/7, to track how odds move before each game (this is
-  what fills the `odds_history` table and powers line movement charts).
-- **Simulations / analysis running automatically** — any future feature
-  that needs to recalculate things on a schedule, without you manually
-  running a script.
-
-A laptop that's turned off, asleep, or closed can't do either of those —
-so this is the point where moving to the cloud actually solves a real
-problem, instead of just adding complexity for no reason.
-
-### Target cloud stack (when the time comes)
-
-| Piece | Where It Goes | What It Replaces |
-|---|---|---|
-| Database | **Supabase** (managed PostgreSQL) | Your local PostgreSQL database |
-| Scheduled backend jobs | **Railway** | You manually running fetcher scripts |
-| Frontend (dashboard website) | **Vercel** | Running `npm run dev` locally |
-
-This matches the stack already listed in `CLAUDE.md` — nothing new to
-decide later, just a matter of *when* to set it up.
-
-### The trigger point
-
-We'll move to cloud hosting once **both** of these are true:
-
-1. Games and odds are being **saved to the database successfully**
-   (Step 4/5 territory — fetchers write to PostgreSQL, not just print).
-2. We want those fetchers to run **24/7 automatically**, so odds history
-   keeps building up even when your PC is off.
-
-Until both of those are true, staying local keeps things simple, free, and
-easy to debug — exactly what we want during development.
+Target stack (when the time comes): Supabase (database), Railway (backend +
+scheduled scripts), Vercel (frontend). This matches what's documented in
+CLAUDE.md — no new decisions needed, just a matter of when.

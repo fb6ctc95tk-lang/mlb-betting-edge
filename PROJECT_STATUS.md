@@ -1,10 +1,10 @@
 # Project Status
 
-Last updated: 2026-06-20
+Last updated: 2026-07-12
 
 ## Current Phase
 
-Operations Hardening
+MVP Complete — Operational Automation Active
 
 ---
 
@@ -61,12 +61,33 @@ Operations Hardening
 - [x] Regression tests: `backend/tests/test_research_endpoints.py` — 9 tests, all passing
 - [x] Tests cover: status codes, response shape, research keys, date validation, routing
 
-### Phase 6 — Operations Hardening (In Progress)
+### Phase 6 — Operations Hardening (Complete)
 - [x] `backend/scripts/run_ingestion.bat` — automation wrapper for Task Scheduler
 - [x] Appends to `logs/ingestion.log` with start/end timestamps and exit code
 - [x] Run timestamp added to `save_live_data.py` output
-- [x] Task Scheduler commands documented (not yet registered)
-- [ ] Register Task Scheduler tasks (11 AM + optional 7 PM)
+- [x] Register Task Scheduler tasks — "MLB Ingestion 11AM" and "MLB Ingestion 7PM"
+- [x] Verified: test run on 2026-07-12 produced exit=0, 15 games saved, log written
+
+### Phase 7 — Research UX (Complete)
+- [x] `GET /game/{game_id}` — full research detail endpoint for a single game
+- [x] Game detail page (`/game/[game_id]`) — dedicated research view per game
+- [x] Data Quality Card — dashboard component showing data completeness warnings
+- [x] Ingestion Status Card — dashboard component showing last run time + exit code
+- [x] Research filters — checkboxes for Has Injuries, Has Significant Line Movement,
+      Has Weather Context (additive AND logic)
+- [x] Sort — Default or Largest Line Movement
+- [x] Research flags — emoji badges (⚠ 📈 🌬) on each game row in the table
+- [x] Flag summary bar — count of flagged games for the current filtered view
+- [x] `frontend/lib/gameFilters.ts` — shared filter logic + LINE_MOVE_THRESHOLD
+- [x] `frontend/lib/gameFlags.ts` — shared flag derivation logic
+- [x] `frontend/lib/gameFlagSummary.ts` — shared flag summary aggregation
+- [x] `frontend/components/ResearchFlags.tsx` — reusable badge renderer
+- [x] Research Workspace — pin games via "+ Workspace" button, persisted in localStorage
+- [x] Workspace Notes — per-game textarea (up to 1000 chars), persisted in localStorage
+- [x] Comparison View — side-by-side table for 2 workspace games, auto-selects when
+      exactly 2 games are in workspace; covers flags, records, pitchers, form,
+      streaks, splits, weather, bullpen, injuries, moneylines, max line move
+- [x] Frontend tests: 34 Vitest tests across gameFilters, gameFlags, gameFlagSummary
 
 ---
 
@@ -74,12 +95,18 @@ Operations Hardening
 
 ```
 MLB Stats API ──┐
-                ├──► save_live_data.py ──► PostgreSQL
+ESPN         ──┤
+Open-Meteo   ──┼──► save_live_data.py ──► PostgreSQL
 OddsAPI.io   ──┘         ▲
                           │
-                 run_ingestion.bat (manual or Task Scheduler)
+             run_ingestion.bat
+             (Task Scheduler: 11 AM + 7 PM daily — ACTIVE)
 
 PostgreSQL ──► FastAPI ──► /research/* ──► Next.js Dashboard
+                                               │
+                                        /game/[id] detail view
+                                        Research Workspace
+                                        Comparison View
 ```
 
 ---
@@ -88,8 +115,10 @@ PostgreSQL ──► FastAPI ──► /research/* ──► Next.js Dashboard
 
 | Source | Data | Status |
 |--------|------|--------|
-| MLB Stats API | Games, pitchers, team records | Active (free, no key) |
+| MLB Stats API | Games, pitchers, records, bullpen | Active (free, no key) |
 | OddsAPI.io | Bet365 + DraftKings moneylines | Active (free tier) |
+| ESPN | Injury reports | Active (free, no key) |
+| Open-Meteo | Stadium weather | Active (free, no key) |
 | SportsDataIO | Any MLB data | Paused (kept in `backend/fetchers/`) |
 
 ---
@@ -99,9 +128,12 @@ PostgreSQL ──► FastAPI ──► /research/* ──► Next.js Dashboard
 | Endpoint | Purpose |
 |----------|---------|
 | `GET /health` | Server health check |
+| `GET /health/ingestion` | Last ingestion run time + exit code (feeds dashboard card) |
+| `GET /health/data-quality` | Data completeness check (feeds dashboard card) |
 | `GET /research/today` | All research data for today's games |
 | `GET /research/date/{date}` | All research data for a historical date |
 | `GET /research/available-dates` | All distinct stored game dates, newest first |
+| `GET /game/{game_id}` | Full research detail for a single game |
 | `GET /games/today` | Raw games only |
 | `GET /odds/movement` | Line movement with filters |
 | `GET /teams` | All 30 teams |
@@ -110,15 +142,42 @@ PostgreSQL ──► FastAPI ──► /research/* ──► Next.js Dashboard
 
 ## Current Test Coverage
 
-- `backend/tests/test_research_endpoints.py` — 9 regression tests
+**Backend — 44 pytest tests (7 modules)**
+- `test_research_endpoints.py` — 9 tests: /research/today, /research/date/{date}, /research/available-dates
+- `test_weather.py` — 6 tests: weather fields, stadium coordinates (all 30 teams)
+- `test_injuries.py` — 7 tests: player parsing, team mapping, edge cases
+- `test_bullpen.py` — 7 tests: innings math, research endpoint integration
+- `test_data_quality.py` — 6 tests: healthy/warning/failed states
+- `test_game_detail.py` — 5 tests: 200/404, required keys, teams/records, weather null
+- `test_health_ingestion.py` — 4 tests: log parsing for healthy/failed/missing/incomplete logs
 - Run with: `backend/venv/Scripts/python.exe -m pytest backend/tests/ -v`
-- Coverage: `/research/today`, `/research/date/{date}`, `/research/available-dates`
 - Tests hit real local PostgreSQL — no mocks
+
+**Frontend — 34 Vitest tests (3 modules)**
+- `gameFilters.test.ts`, `gameFlags.test.ts`, `gameFlagSummary.test.ts`
+- Run with: `cd frontend && npm test`
 
 ---
 
-## Pending
+## Known Issues
 
-- Register Task Scheduler tasks for automated daily ingestion
-  - 11 AM: `schtasks /create /tn "MLB Ingestion 11AM" /tr "C:\Users\rich-\RICH-LABS\mlb-betting-edge\backend\scripts\run_ingestion.bat" /sc daily /st 11:00 /ru %USERNAME% /f`
-  - 7 PM (optional): same command with `/tn "MLB Ingestion 7PM" /st 19:00`
+- **Injury team mapping** — ESPN injury feed returns team names that don't all match
+  the abbreviations in the `teams` table. Most injury rows are skipped at save time
+  with "unknown team" in the log. Injury data is fetched correctly; the gap is
+  in the save-side team-name-to-abbreviation mapping.
+- **Open-Meteo occasional 503s** — transient; the ingestion script logs and skips
+  affected stadiums, exits with code 0. Typically resolves on the next run.
+- **Interactive only logon mode** — Task Scheduler tasks require an active user session.
+  If the PC is asleep or logged out at 11 AM or 7 PM, that day's run is skipped.
+
+## Task Scheduler Registration (Completed 2026-07-12)
+
+Both tasks are registered and active on RICH-LAB:
+
+```
+schtasks /create /tn "MLB Ingestion 11AM" /tr "C:\Users\rich-\RICH-LABS\mlb-betting-edge\backend\scripts\run_ingestion.bat" /sc daily /st 11:00 /ru "rich-" /f
+schtasks /create /tn "MLB Ingestion 7PM"  /tr "C:\Users\rich-\RICH-LABS\mlb-betting-edge\backend\scripts\run_ingestion.bat" /sc daily /st 19:00 /ru "rich-" /f
+```
+
+If tasks ever need to be re-registered (e.g., after a Windows reinstall), run
+the commands above from any PowerShell prompt. The `/f` flag overwrites silently.
