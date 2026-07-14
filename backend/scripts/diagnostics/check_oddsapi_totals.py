@@ -21,10 +21,19 @@ Purpose:
 Result is used to decide whether Full-Game Totals support can be added
 using the current provider, or whether it requires a plan upgrade.
 
-Note: Run on a day when regular-season games are scheduled and
-bookmakers have posted lines (typically same-day or one day prior).
-Running during the All-Star break or very early before lines open will
-produce empty bookmakers on all events.
+PRE-RUN REQUIREMENT — read before running:
+    1. Confirm today's 11 AM scheduled ingestion has completed (exit=0).
+    2. Check logs/ingestion.log for the line "Found N odds records".
+    3. N must be > 0. "Games saved" alone does not mean bookmaker odds exist.
+       A run with exit=0 but "Found 0 odds records" means bookmakers have not
+       posted lines yet — this script will return INCONCLUSIVE in that case.
+    4. See backend/scripts/diagnostics/TOTALS_DIAGNOSTIC_RUNBOOK.md for the
+       full recheck procedure.
+
+Rate limit:
+    This script makes at most 6 API requests (1 events + up to 3 odds +
+    up to 2 market probes). The free tier allows 100 requests/hour.
+    Do NOT run broad event scans outside this script — they consume the budget.
 """
 
 import os
@@ -48,7 +57,7 @@ BOOKMAKERS = "Bet365,DraftKings"
 
 # Inspect up to this many events. One is usually enough to confirm presence
 # or absence of totals; three guards against games where no markets are
-# posted yet.
+# posted yet. Do not raise this — see rate-limit note in the docstring.
 MAX_EVENTS_TO_CHECK = 3
 
 
@@ -69,12 +78,16 @@ def main():
         print("See docs/ODDS_API_SETUP.md for setup instructions.")
         sys.exit(1)
 
+    api_calls = 0
+
     # --- Step 1: Fetch upcoming events ---
     print("Step 1: Fetching upcoming MLB events ...")
-    events = _get_upcoming_events()
+    events, api_calls = _get_upcoming_events(api_calls)
     print(f"  Pending events found : {len(events)}")
 
     if not events:
+        print()
+        print(f"  API calls made : {api_calls}")
         print()
         print("RESULT: No pending MLB events found.")
         print("  Cannot determine totals availability — no events to inspect.")
@@ -88,6 +101,11 @@ def main():
     print()
 
     # --- Step 2: Fetch raw odds (no market filter) for each event ---
+    # NOTE: This script cannot pre-verify which events have bookmaker data
+    # without making requests. It inspects the first MAX_EVENTS_TO_CHECK
+    # pending events by date. If those events have no lines posted, the
+    # result will be INCONCLUSIVE regardless of whether later events have
+    # data. See the runbook for the pre-check procedure using ingestion logs.
     totals_found = False
     totals_example = None
     non_ml_seen = []
@@ -101,7 +119,7 @@ def main():
         print(f"  Matchup   : {matchup}")
         print(f"  Game time : {game_time}")
 
-        odds_data = _get_raw_odds(event_id)
+        odds_data, api_calls = _get_raw_odds(event_id, api_calls)
         if odds_data is None:
             print("  Skipping — request failed.")
             print()
@@ -143,19 +161,29 @@ def main():
         print()
 
     # --- Step 3: Probe whether the 'markets' parameter is accepted ---
-    # Test with markets=totals and markets=ML,totals on the first event.
-    # A 200 response (even with empty bookmakers) means the parameter is
-    # recognized. A 400/422 means the plan does not support this market.
-    print("Step 3: Probe markets parameter support ...")
-    first_event_id = to_check[0]["id"]
-    first_matchup = f"{to_check[0].get('away','?')} @ {to_check[0].get('home','?')}"
-    print(f"  Using event {first_event_id} ({first_matchup})")
-    print()
+    # Skipped when all events returned empty bookmakers: there is no useful
+    # signal to extract, and skipping preserves 2 requests in the budget.
+    # This probe was already confirmed HTTP 200 in Phase 13 Sprint 1 and
+    # does not need to be repeated on empty events.
+    if not all_empty:
+        print("Step 3: Probe markets parameter support ...")
+        first_event_id = to_check[0]["id"]
+        first_matchup = f"{to_check[0].get('away','?')} @ {to_check[0].get('home','?')}"
+        print(f"  Using event {first_event_id} ({first_matchup})")
+        print()
 
-    _probe_market_param("totals", first_event_id)
-    _probe_market_param("ML,totals", first_event_id)
+        api_calls = _probe_market_param("totals", first_event_id, api_calls)
+        api_calls = _probe_market_param("ML,totals", first_event_id, api_calls)
+    else:
+        print("Step 3: Market parameter probes SKIPPED")
+        print("  All events returned empty bookmakers.")
+        print("  Probes confirmed HTTP 200 in Phase 13 Sprint 1 — not repeated on empty events.")
+        print(f"  2 requests saved.")
 
     # --- Step 4: Final verdict ---
+    print()
+    print(f"Total API calls made : {api_calls} (free tier limit: 100/hour)")
+    print()
     print("=" * 60)
     print("DIAGNOSTIC RESULT")
     print("=" * 60)
@@ -187,15 +215,16 @@ def main():
         print("Non-ML markets observed  : INCONCLUSIVE")
         print()
         print("  All events returned empty bookmakers.")
-        print("  This means no markets have been posted yet for upcoming games.")
+        print("  This means no markets have been posted yet for the inspected events.")
         print()
-        print("  This is expected when:")
-        print("    - Running during the MLB All-Star break")
-        print("    - Running very early before bookmakers post lines")
-        print("    - All inspected events are 2+ days away")
+        print("  IMPORTANT: 'games saved' in ingestion logs does not mean bookmaker")
+        print("  odds are populated. Confirm logs/ingestion.log shows:")
+        print("    'Found N odds records' where N > 0")
+        print("  before concluding that this script should find populated data.")
         print()
         print("  This result does NOT confirm totals are unavailable.")
-        print("  Re-run on a regular-season game day with active markets.")
+        print("  See backend/scripts/diagnostics/TOTALS_DIAGNOSTIC_RUNBOOK.md")
+        print("  for the required pre-check procedure.")
 
     else:
         print("Non-ML markets observed  : NO")
@@ -213,7 +242,7 @@ def main():
     print("No database writes. No production code was changed.")
 
 
-def _probe_market_param(markets_value, event_id):
+def _probe_market_param(markets_value, event_id, api_calls):
     """Test whether a specific markets= parameter value is accepted by the API."""
     params = {
         "apiKey": API_KEY,
@@ -224,6 +253,7 @@ def _probe_market_param(markets_value, event_id):
     }
     try:
         response = requests.get(f"{BASE_URL}/odds", params=params, timeout=10)
+        api_calls += 1
         books = {}
         if response.ok:
             data = response.json()
@@ -236,29 +266,31 @@ def _probe_market_param(markets_value, event_id):
             print(f"    Error body: {response.text[:200]}")
     except Exception as exc:
         print(f"  markets={markets_value!r:<16} Error: {exc}")
+    return api_calls
 
 
-def _get_upcoming_events():
+def _get_upcoming_events(api_calls):
     url = f"{BASE_URL}/events"
     params = {"apiKey": API_KEY, "sport": SPORT, "league": LEAGUE}
     try:
         response = requests.get(url, params=params, timeout=10)
+        api_calls += 1
         response.raise_for_status()
         data = response.json()
         pending = [e for e in data if e.get("status") == "pending" and e.get("date")]
         pending.sort(key=lambda e: e["date"])
-        return pending
+        return pending, api_calls
     except requests.HTTPError as exc:
         status = exc.response.status_code
         body = exc.response.text[:300]
         print(f"  HTTP {status} fetching events: {body}")
-        return []
+        return [], api_calls
     except Exception as exc:
         print(f"  Error fetching events: {exc}")
-        return []
+        return [], api_calls
 
 
-def _get_raw_odds(event_id):
+def _get_raw_odds(event_id, api_calls):
     """Fetch odds for one event with NO market name filter applied."""
     url = f"{BASE_URL}/odds"
     params = {
@@ -269,16 +301,17 @@ def _get_raw_odds(event_id):
     }
     try:
         response = requests.get(url, params=params, timeout=10)
+        api_calls += 1
         response.raise_for_status()
-        return response.json()
+        return response.json(), api_calls
     except requests.HTTPError as exc:
         status = exc.response.status_code
         body = exc.response.text[:300]
         print(f"  HTTP {status} fetching odds: {body}")
-        return None
+        return None, api_calls
     except Exception as exc:
         print(f"  Error fetching odds: {exc}")
-        return None
+        return None, api_calls
 
 
 def _describe_shape(data):

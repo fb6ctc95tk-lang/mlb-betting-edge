@@ -399,11 +399,19 @@ The diagnostic was re-run on 2026-07-14 as Phase 13 Sprint 2. A broader pre-flig
 
 **Rate limit caution:** The 50-event pre-flight scan is expensive (50 API calls). Future re-runs should use the diagnostic script directly (approximately 5 calls total) rather than the broad event scan. The free tier allows 100 requests/hour.
 
-**Next valid recheck condition:** Run the diagnostic script on July 16, 2026 after the 11 AM scheduled ingestion fires and confirms non-empty odds in the log. If the log shows lines were saved, the diagnostic will have something to inspect. Do not run the broad 50-event scan again — use the script only.
+**Next valid recheck condition (updated after Phase 13 Sprint 3):**
+
+Run the diagnostic only after **both** conditions are met:
+1. The 11 AM scheduled ingestion for the day has completed (exit=0).
+2. `logs/ingestion.log` shows `Found N odds records` where **N > 0**.
+
+"Games saved" is not sufficient. The July 12 ingestion saved 15 games but found 0 odds records — bookmakers did not post lines that day. The diagnostic must have confirmed bookmaker data to produce a meaningful result.
+
+See `backend/scripts/diagnostics/TOTALS_DIAGNOSTIC_RUNBOOK.md` for the complete step-by-step procedure, verdict rules, and known limitations.
 
 If totals appear: the path to Full-Game Totals research requires no provider change — only a schema addition and fetcher update.
 
-If totals do not appear with active moneyline data present: Full-Game Totals is blocked on a provider upgrade, exactly like every other non-ML market.
+If totals do not appear with active moneyline data confirmed: Full-Game Totals is blocked on a provider upgrade, exactly like every other non-ML market.
 
 ### 6.3 What Definitely Requires a Provider Change
 
