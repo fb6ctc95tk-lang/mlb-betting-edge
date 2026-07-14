@@ -362,7 +362,31 @@ The ML filter in `odds_api_io.py` was a deliberate V1 scoping decision, not a wo
 
 **This is the single most important thing to investigate before planning any new market work.**
 
-How to test: Send a raw request to `https://api.odds-api.io/v3` with the current API key but without the ML market filter. Inspect the raw JSON to see whether any market other than "ML" appears in the response.
+**Diagnostic run: 2026-07-14 — INCONCLUSIVE (All-Star break)**
+
+`backend/scripts/diagnostics/check_oddsapi_totals.py` was run on 2026-07-14.
+
+To run the diagnostic:
+```
+backend/venv/Scripts/python.exe backend/scripts/diagnostics/check_oddsapi_totals.py
+```
+
+This script is read-only. It does not write to the database, modify ingestion, or change any production code path.
+
+**What was found on 2026-07-14:**
+
+- 986 pending MLB events returned by the API (July 16 – September 27)
+- No games exist for July 14 (All-Star break; regular season resumes July 17)
+- All events returned empty `bookmakers: {}` — bookmakers have not yet posted lines for the July 16+ slate
+- `markets=totals` parameter: HTTP 200 ACCEPTED — the API did not reject the parameter or return a plan/authorization error
+- `markets=ML,totals` parameter: HTTP 200 ACCEPTED — same result
+- No non-ML market names appeared in any response
+
+**Interpretation:** The result is inconclusive, not negative. Empty bookmakers mean lines haven't been posted yet — not that totals are unavailable. The `markets=totals` parameter being accepted without error (HTTP 200, not 400 or 403) is a positive signal: if the free tier blocked totals entirely, an error response would be expected.
+
+**Discovery: the API supports a `markets` parameter.** The production fetcher does not currently use it. When lines are posted, specifying `markets=totals` or `markets=ML,totals` may be the correct way to request totals data. This should be tested in the re-run.
+
+**Action required:** Re-run the diagnostic on July 16 or 17, 2026, once bookmakers post lines for the regular-season slate. This will produce a conclusive result.
 
 If totals appear: the path to Full-Game Totals research requires no provider change — only a schema addition and fetcher update.
 
