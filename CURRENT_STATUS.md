@@ -1,7 +1,7 @@
 # Current Status — MLB Betting Edge
 
-**Last updated:** 2026-07-12
-**Current Phase:** MVP Complete — Operational Automation Active
+**Last updated:** 2026-07-14
+**Current Phase:** Phase 13 Active — Research Layer + Market Research Board + Totals Investigation Pending
 
 This file is a "save point" for the project. If you take a break and come
 back later (or open a new chat with Claude Code), read this file first —
@@ -48,7 +48,7 @@ read from PostgreSQL. CORS is enabled for `http://localhost:3000`.
 | `GET /research/today` | Full research payload for today's games (single call for all data) |
 | `GET /research/date/{date}` | Same payload for any historically stored date |
 | `GET /research/available-dates` | All distinct stored game dates, newest first |
-| `GET /game/{game_id}` | Full research detail for a single game |
+| `GET /research/game/{game_id}` | Full research detail for a single game |
 | `GET /games/today` | Raw game list (no research data) |
 | `GET /odds/movement` | Line movement with optional filters |
 | `GET /teams` | All 30 MLB teams |
@@ -101,6 +101,51 @@ Two pages:
 - Shows full matchup: pitchers, records, streaks, splits, form, weather,
   injuries, bullpen, odds, and line movement for that game only.
 - Linked from the games table "View" column and from the workspace.
+- Research Insights panel: displays all generated insights for the game
+  (form vs. market divergence, record vs. recent form divergence).
+
+**Market Research Board (`/opportunities`)**
+- Lists Market Opportunities across all games for a selected date.
+- Date selector mirrors the homepage pattern: defaults to Today, supports
+  any stored historical date, "Back to Today" button.
+- Fetches from `GET /research/today` or `GET /research/date/{date}` —
+  same data source as the homepage.
+- Each card shows: game matchup, market type (`FULL_GAME_MONEYLINE`),
+  opportunity title, summary, reasons, caution notes, and source insights.
+- No EV, no fair odds, no confidence ratings, no betting recommendations.
+- All opportunity language is neutral and research-oriented.
+
+### Research Layer (frontend/lib/)
+All three modules are pure TypeScript — no backend, no database changes.
+
+**`researchInsights.ts`** — insight generators
+- `InsightableGame` structural type: game object with optional form/odds/record fields.
+- `getResearchInsights(game)` — runs all generators, returns flat `ResearchInsight[]`.
+- **Generator 1 — Form vs. Market Divergence** (`form-market-divergence`):
+  fires when a hot team (≥65% last-N win rate) is priced as a significant
+  underdog (≤42% implied), or a cold team (≤35%) is priced as a heavy
+  favorite (≥58%).
+- **Generator 2 — Record vs. Recent Form Divergence**
+  (`record-form-divergence-{away|home}-{up|down}`):
+  fires when recent win rate diverges from season win rate by ≥15 percentage
+  points. Independent per team (up to two insights per game).
+- Minimum sample: 5 games for any form-based insight.
+- No betting language. No Market Opportunity mapping in this layer.
+
+**`marketOpportunities.ts`** — opportunity generators
+- `MarketType = "FULL_GAME_MONEYLINE"` — only supported type.
+- `MarketOpportunity` type: `{ id, gameId, marketType, title, summary,
+  reasons[], cautionNotes[], sourceInsightIds[], displayPriority? }`.
+  No `direction`, `team`, or `confidence` fields.
+- **Generator — Form Divergence to Moneyline**: fires on `form-market-divergence`
+  insight ID; produces one `FULL_GAME_MONEYLINE` opportunity per trigger.
+- `getMarketOpportunities(game, insights)` — runs all generators.
+
+**`marketResearchBoard.ts`** — board data helper
+- `getBoardResearchUrl(apiBase, selectedDate)` — pure URL helper; returns
+  `/research/today` or `/research/date/{date}`; exported for testing.
+- `getMarketOpportunitiesForBoard(games)` — maps all games through insight
+  and opportunity generators, returns flattened board entries.
 
 ### Shared Frontend Logic (frontend/lib/)
 - `gameFilters.ts` — `applyFilters()` applies the three checkbox filters;
@@ -121,12 +166,15 @@ Two pages:
   completeness warnings.
 
 ### Test Coverage
-- **Backend** — 44 pytest tests across 7 modules:
+- **Backend** — 50 pytest tests across 7 modules:
   `test_research_endpoints.py`, `test_weather.py`, `test_injuries.py`,
   `test_bullpen.py`, `test_data_quality.py`, `test_game_detail.py`,
   `test_health_ingestion.py`. All pass. Tests hit real local PostgreSQL — no mocks.
-- **Frontend** — 34 Vitest tests across 3 modules:
-  `gameFilters.test.ts`, `gameFlags.test.ts`, `gameFlagSummary.test.ts`. All pass.
+- **Frontend** — 107 Vitest tests across 6 modules:
+  `gameFilters.test.ts`, `gameFlags.test.ts`, `gameFlagSummary.test.ts`,
+  `researchInsights.test.ts` (42 tests),
+  `marketOpportunities.test.ts` (14 tests),
+  `marketResearchBoard.test.ts` (17 tests). All pass.
 
 ---
 
@@ -141,16 +189,22 @@ Two pages:
 - ✅ FastAPI backend — all endpoints tested against real data.
 - ✅ Dashboard — homepage renders all 25 columns correctly with live data.
 - ✅ Game detail page — renders full research context for a single game.
+- ✅ Research Insights panel — form-market-divergence and record-form-divergence
+  insights render on `/game/211` (NYM exceeds season profile, ATL trails season profile).
+- ✅ Market Research Board — `/opportunities` loads, historical date selector works,
+  2026-06-19 renders a valid board entry; no EV/confidence/recommendations present.
 - ✅ Research workspace — add/remove games, notes persist in localStorage.
 - ✅ Comparison view — side-by-side table renders correctly for 2 workspace games.
 - ✅ Research flags — injury/line movement/weather badges appear on correct games.
 - ✅ Filters and sort — checkboxes and sort dropdown filter/reorder the game list correctly.
-- ✅ Date selector — dropdown populates from API, historical dates load correctly.
+- ✅ Date selector (homepage and board) — dropdown populates from API, historical dates load.
 - ✅ Task Scheduler — `schtasks /run` test on 2026-07-12 produced exit=0, 15 games saved,
-  log entry written correctly; next scheduled run confirmed for 2026-07-13 11:00 AM.
-- ✅ All 78 automated tests pass (44 backend + 34 frontend).
+  log entry written correctly.
+- ✅ All 157 automated tests pass (50 backend + 107 frontend).
 - ✅ TypeScript passes with 0 errors.
 - ✅ ESLint passes with 0 warnings.
+- ⚠ OddsAPI.io totals market: STILL INCONCLUSIVE — all diagnostic runs fell during
+  the MLB All-Star break when no games were scheduled. Recheck required.
 
 ---
 
@@ -194,7 +248,10 @@ mlb-betting-edge/
 │   │   └── teams.py               /teams
 │   ├── scripts/
 │   │   ├── save_live_data.py      Daily ingestion (accepts --date flag)
-│   │   └── run_ingestion.bat      Task Scheduler wrapper — writes to logs/ingestion.log
+│   │   ├── run_ingestion.bat      Task Scheduler wrapper — writes to logs/ingestion.log
+│   │   └── diagnostics/
+│   │       ├── check_oddsapi_totals.py    OddsAPI.io totals market probe (max 6 requests)
+│   │       └── TOTALS_DIAGNOSTIC_RUNBOOK.md   Controlled recheck instructions
 │   └── tests/
 │       ├── test_research_endpoints.py
 │       ├── test_weather.py
@@ -210,7 +267,8 @@ mlb-betting-edge/
 │
 ├── docs/
 │   ├── ODDS_PROVIDER_RESEARCH.md
-│   └── ODDS_API_SETUP.md
+│   ├── ODDS_API_SETUP.md
+│   └── MARKET_RESEARCH_ARCHITECTURE.md   Research layer design + diagnostic log
 │
 └── frontend/                      Next.js app (TypeScript, App Router, ESLint)
     ├── .env.local                 NEXT_PUBLIC_API_URL=http://localhost:8000
@@ -223,7 +281,13 @@ mlb-betting-edge/
     │   ├── gameFlags.ts           getGameFlags()
     │   ├── gameFlags.test.ts
     │   ├── gameFlagSummary.ts     getGameFlagSummary()
-    │   └── gameFlagSummary.test.ts
+    │   ├── gameFlagSummary.test.ts
+    │   ├── researchInsights.ts    InsightableGame, getResearchInsights(), two generators
+    │   ├── researchInsights.test.ts
+    │   ├── marketOpportunities.ts MarketOpportunity, getMarketOpportunities(), FULL_GAME_MONEYLINE
+    │   ├── marketOpportunities.test.ts
+    │   ├── marketResearchBoard.ts getBoardResearchUrl(), getMarketOpportunitiesForBoard()
+    │   └── marketResearchBoard.test.ts
     └── app/
         ├── layout.tsx
         ├── page.tsx               Homepage (all dashboard features)
@@ -231,9 +295,11 @@ mlb-betting-edge/
         ├── components/
         │   ├── IngestionStatusCard.tsx
         │   └── DataQualityCard.tsx
-        └── game/
-            └── [game_id]/
-                └── page.tsx       Game detail research view
+        ├── game/
+        │   └── [game_id]/
+        │       └── page.tsx       Game detail research view + Research Insights panel
+        └── opportunities/
+            └── page.tsx           Market Research Board with historical date selector
 ```
 
 ---
@@ -283,6 +349,25 @@ field. The `/games/today` endpoint filters on UTC date, which matches the
 schedule date for most of the day but may not match for a brief window
 right after midnight UTC (roughly 8–11 PM ET). Not a problem in practice.
 
+### OddsAPI.io Totals Market — INCONCLUSIVE (Phase 13 diagnostic)
+Three diagnostic runs were performed to probe whether OddsAPI.io's free tier
+returns totals (over/under) data. All runs fell during the MLB All-Star break
+(no games scheduled), so every event had empty bookmakers — inconclusive, not
+"unavailable." The `markets=totals` parameter returns HTTP 200 (request accepted)
+but yields no data when no games are live.
+
+**Recheck condition:** Run only after scheduled ingestion exits with code 0 AND
+`logs/ingestion.log` shows `Found N odds records` where N > 0 in the same run.
+`Games saved: N` alone is NOT sufficient — odds must be present.
+
+**Diagnostic command (max 6 API requests):**
+```
+.\backend\venv\Scripts\python.exe .\backend\scripts\diagnostics\check_oddsapi_totals.py
+```
+
+**Do not run** outside the controlled diagnostic script. Do not implement totals
+storage, schema changes, or production fetcher updates based on this diagnostic.
+
 ### Task Scheduler — Interactive Only
 Both scheduled tasks run in `Interactive only` logon mode, meaning they
 require an active user session. If the PC is asleep or logged out at
@@ -306,6 +391,12 @@ the reloader subprocess changes the working directory.
   are currently skipped at save time due to unknown team names.
 - ❌ No prediction model, edge calculations, or betting logic.
 - ❌ No push notifications, email alerts, or mobile-optimized layout.
+- ⏳ Totals market support — BLOCKED pending valid OddsAPI.io recheck.
+  See Phase 13 diagnostic status in Known Issues above.
+- ❌ Additional Research Insight generators (bullpen stress, streak pressure,
+  road/home form splits, line move vs. form) — planned but not yet built.
+- ❌ Additional MarketType values beyond `FULL_GAME_MONEYLINE` — no RunLine,
+  Totals, or First-5 markets implemented.
 
 ---
 

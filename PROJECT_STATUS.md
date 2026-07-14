@@ -1,10 +1,10 @@
 # Project Status
 
-Last updated: 2026-07-12
+Last updated: 2026-07-14
 
 ## Current Phase
 
-MVP Complete — Operational Automation Active
+Phase 13 Active — Research Insight Layer + Market Research Board + Totals Investigation
 
 ---
 
@@ -73,7 +73,7 @@ MVP Complete — Operational Automation Active
 - [x] Form vs. Market Divergence — first insight generator (hot underdog / cold favorite)
 - [x] Homepage integration — insight count badge in game Detail cell
 - [x] Game detail page integration — Research Insights section with full cards
-- [x] `frontend/lib/researchInsights.test.ts` — 17 Vitest tests
+- [x] `frontend/lib/researchInsights.test.ts` — 17 Vitest tests (expanded to 42 in Phase 13 Interim Sprint 2)
 - [x] Frontend-only; no backend, database, or API changes
 
 ### Phase 11 — Game Detail Display Parity (Complete)
@@ -108,6 +108,55 @@ MVP Complete — Operational Automation Active
 - [x] `frontend/lib/marketOpportunities.test.ts` — 14 Vitest tests
 - [x] Frontend-only; no backend, database, or API changes
 - [x] Other markets (totals, NRFI, F5, player props) deferred — supporting data does not currently exist
+
+### Phase 12 — Market Research Board v1 (Complete)
+- [x] `frontend/app/opportunities/page.tsx` — new page listing Market Opportunities across all games
+- [x] `frontend/lib/marketResearchBoard.ts` — `getBoardResearchUrl()` pure URL helper, `getMarketOpportunitiesForBoard()` aggregator
+- [x] Reuses existing `/research/today` endpoint — no new backend endpoints
+- [x] Board cards show: game matchup, market type, title, summary, reasons, caution notes, source insights
+- [x] No EV, no fair odds, no confidence ratings, no predictions, no recommendations
+- [x] `frontend/lib/marketResearchBoard.test.ts` — 12 Vitest tests
+- [x] Frontend-only; no backend, database, or API changes
+
+### Phase 13 Sprint 1 — OddsAPI.io Full-Game Totals Diagnostic (Complete)
+- [x] `backend/scripts/diagnostics/check_oddsapi_totals.py` — controlled probe (max 6 requests)
+- [x] `backend/scripts/diagnostics/TOTALS_DIAGNOSTIC_RUNBOOK.md` — controlled recheck instructions
+- [x] First diagnostic run: INCONCLUSIVE — All-Star break, no games scheduled, empty bookmakers
+- [x] Empty bookmakers ≠ totals unavailable; inconclusive result logged
+
+### Phase 13 Sprint 2 — Totals Diagnostic Recheck (Complete)
+- [x] Second and third diagnostic runs: STILL INCONCLUSIVE — All-Star break continued
+- [x] `markets=totals` returns HTTP 200 (request accepted) but empty payloads
+- [x] HTTP 200 alone does not confirm usable free-tier totals access
+- [x] Recheck condition established: ingestion log must show `Found N odds records` where N > 0
+
+### Phase 13 Sprint 3 — Totals Diagnostic Readiness and Rate-Limit Guardrails (Complete)
+- [x] Diagnostic script updated with explicit rate-limit guardrails (stop on HTTP 429)
+- [x] Runbook updated: max 3 events to inspect, stop on 429, do not run repeatedly in one session
+- [x] Recheck condition and diagnostic command documented in runbook
+- [x] No production ingestion, schema, or storage changes
+
+### Phase 13 Interim Sprint — Market Research Board Historical Date Parity (Complete)
+- [x] `/opportunities` page now matches homepage date-selector pattern exactly
+- [x] `DateSelector` sub-component with `<select>`, "Back to Today" button
+- [x] Two-`useEffect` pattern: one for available dates, one for board data
+- [x] `getBoardResearchUrl()` helper drives all URL construction (testable independently)
+- [x] 7 additional `marketResearchBoard.test.ts` tests (12 → 17 total, getBoardResearchUrl coverage)
+- [x] Added "opportunity has no team, side, or direction field" assertion test
+- [x] Frontend-only; no backend, database, or API changes
+
+### Phase 13 Interim Sprint 2 — Record vs. Recent Form Divergence Insight (Complete)
+- [x] `recordVsRecentFormDivergence` generator added to `researchInsights.ts` INSIGHT_GENERATORS registry
+- [x] Fires when a team's recent win rate diverges from its season win rate by ≥15 percentage points
+- [x] Generates independent insights for away and home teams (up to two per game)
+- [x] Four stable insight IDs: `record-form-divergence-{away|home}-{up|down}`
+- [x] Fallback: uses `last_10_wins + last_10_losses` when `last_10_games_count` is absent
+- [x] Minimum sample: 5 games; 0-0 season record rejected; three-segment records rejected
+- [x] Neutral research language only — no betting terms
+- [x] `away_record?` and `home_record?` added as optional fields to `InsightableGame`
+- [x] `last_10_losses` and `last_10_games_count` made optional on `TeamForm`
+- [x] 25 new tests in `researchInsights.test.ts` (17 → 42 total)
+- [x] Frontend-only; no backend, database, or API changes
 
 ### Phase 7 — Research UX (Complete)
 - [x] `GET /game/{game_id}` — full research detail endpoint for a single game
@@ -145,7 +194,8 @@ OddsAPI.io   ──┘         ▲
 
 PostgreSQL ──► FastAPI ──► /research/* ──► Next.js Dashboard
                                                │
-                                        /game/[id] detail view
+                                        /game/[id] detail view  (+ Research Insights panel)
+                                        /opportunities board    (Market Research Board)
                                         Research Workspace
                                         Comparison View
 ```
@@ -174,7 +224,7 @@ PostgreSQL ──► FastAPI ──► /research/* ──► Next.js Dashboard
 | `GET /research/today` | All research data for today's games |
 | `GET /research/date/{date}` | All research data for a historical date |
 | `GET /research/available-dates` | All distinct stored game dates, newest first |
-| `GET /game/{game_id}` | Full research detail for a single game |
+| `GET /research/game/{game_id}` | Full research detail for a single game |
 | `GET /games/today` | Raw games only |
 | `GET /odds/movement` | Line movement with filters |
 | `GET /teams` | All 30 teams |
@@ -194,16 +244,24 @@ PostgreSQL ──► FastAPI ──► /research/* ──► Next.js Dashboard
 - Run with: `backend/venv/Scripts/python.exe -m pytest backend/tests/ -v`
 - Tests hit real local PostgreSQL — no mocks
 
-**Frontend — 65 Vitest tests (5 modules)**
+**Frontend — 107 Vitest tests (6 modules)**
 - `gameFilters.test.ts`, `gameFlags.test.ts`, `gameFlagSummary.test.ts`
-- `researchInsights.test.ts` — 17 tests: form vs. market divergence, thresholds, multi-book averaging
+- `researchInsights.test.ts` — 42 tests: form vs. market divergence, record vs. recent form divergence,
+  thresholds, boundary behavior, fallback logic, neutral-language assertions, coexistence
 - `marketOpportunities.test.ts` — 14 tests: generator registry, opportunity shape, caution note content
+- `marketResearchBoard.test.ts` — 17 tests: URL helper, board aggregation, no team/side/direction fields
 - Run with: `cd frontend && npm test`
 
 ---
 
-## Known Issues
+## Known Issues and Blocked Items
 
+- **OddsAPI.io Totals — INCONCLUSIVE (Phase 13 diagnostic)** — Three controlled diagnostic
+  runs fell during the MLB All-Star break (no games scheduled, empty bookmakers). HTTP 200
+  for `markets=totals` does not confirm usable free-tier access. Totals availability
+  unconfirmed. Recheck condition: ingestion exit=0 AND `logs/ingestion.log` shows
+  `Found N odds records` where N > 0. Do not run the diagnostic, add Totals support, or
+  add new MarketType values until the recheck condition is met.
 - **Injury team mapping** — ESPN injury feed returns team names that don't all match
   the abbreviations in the `teams` table. Most injury rows are skipped at save time
   with "unknown team" in the log. Injury data is fetched correctly; the gap is

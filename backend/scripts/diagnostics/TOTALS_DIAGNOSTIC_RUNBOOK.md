@@ -173,7 +173,11 @@ Update `docs/MARKET_RESEARCH_ARCHITECTURE.md` Section 6.2 with:
 
 - Do not run a 50-event scan. It burned the Sprint 2 rate budget.
 - Do not run the diagnostic without first checking the ingestion log.
+- Do not run the diagnostic more than once per session. Each run consumes up to
+  6 requests. Running it twice in one session risks consuming the full 100/hour budget.
+- If the script returns HTTP 429 at any step, stop immediately. Do not retry.
+  HTTP 429 means the rate limit is reached; further calls will fail or waste future budget.
 - Do not conclude NOT AVAILABLE from empty bookmakers — that is INCONCLUSIVE.
 - Do not implement totals storage, schema changes, or production fetcher updates
-  based on this diagnostic alone. A AVAILABLE verdict requires Project Manager
-  review before any implementation sprint begins.
+  based on this diagnostic alone. An AVAILABLE verdict requires review before any
+  implementation sprint begins.

@@ -1,8 +1,8 @@
 # Market Research Architecture
 ## MLB Betting Edge — Phase 8 Research Layer Foundation
 
-**Status:** Active — Phase 9 implemented MarketOpportunity layer (2026-07-13)
-**Date:** 2026-07-12 (updated 2026-07-13)
+**Status:** Active — Phase 13 Interim Sprint 2 complete (2026-07-14). Two insight generators live. Market Research Board with historical date support shipped. Totals diagnostic pending valid recheck condition.
+**Date:** 2026-07-14
 
 This document describes the current architecture and implementation roadmap based only on confirmed data sources currently available in the application. It intentionally avoids assumptions about future APIs, sportsbook markets, or predictive models.
 
@@ -237,7 +237,13 @@ Five distinct types. Each type has exactly one job and lives in one layer.
 
 **Job:** Compare two signals and surface a notable divergence. An insight says "this measurable thing is inconsistent with that measurable thing." It is descriptive, not prescriptive.
 
-**Example:** "Hot Team as Underdog — PHI is 7-3 in their last 10 but the market prices them at 38% implied probability."
+**Example (Form vs. Market Divergence):** "Hot Team as Underdog — PHI is 7-3 in their last 10 but the market prices them at 38% implied probability."
+
+**Example (Record vs. Recent Form Divergence):** "PHI recent form exceeds season profile — PHI has won 70.0% of its last 10 games compared with a 52.0% season win rate, a +18.0 percentage-point difference."
+
+**Implemented generators (as of 2026-07-14):**
+1. `formVsMarketDivergence` — fires when a hot team is priced as a significant underdog, or a cold team is priced as a heavy favorite. IDs: `form-market-divergence`.
+2. `recordVsRecentFormDivergence` — fires when recent win rate diverges from season win rate by ≥15 percentage points. IDs: `record-form-divergence-{away|home}-{up|down}`.
 
 **Rule:** Insights never say "bet this." They never recommend a direction. They surface a pattern and stop. The researcher decides what to do with it.
 
@@ -249,9 +255,20 @@ Five distinct types. Each type has exactly one job and lives in one layer.
 
 **Job:** Associate a specific bet type and direction with a supporting research narrative. A MarketOpportunity says: "given these signals, here is the specific wager they point toward and what supports it."
 
-**Proposed fields:** `market` (e.g. "full-game moneyline"), `direction` (e.g. "away"), `team`, `game_id`, `supporting_insights` (ResearchInsight[]), `confidence: "low" | "medium" | "high"`
+**Implemented fields (as of Phase 9):**
+- `id: string` — stable identifier for the opportunity
+- `gameId: string` — linked game
+- `marketType: MarketType` — currently `"FULL_GAME_MONEYLINE"` only
+- `title: string` — short headline
+- `summary: string` — one-sentence research narrative
+- `reasons: string[]` — bullet points supporting the opportunity
+- `cautionNotes: string[]` — known risks or data limitations
+- `sourceInsightIds: string[]` — IDs of the ResearchInsights that triggered this opportunity
+- `displayPriority?: number` — optional sort hint
 
-**Rule:** MarketOpportunity does NOT say "this is a good bet." It says "here is the research case, here is the specific leg, here is what supports it." The researcher still decides. Confidence is ordinal (count of corroborating signals) — never a hidden probability calculation.
+**Fields NOT implemented:** No `direction`, no `team`, no `confidence` field. The opportunity is game-level and market-level — it names the market type but does not prescribe which side to choose.
+
+**Rule:** MarketOpportunity does NOT say "this is a good bet." It says "here is the research case for this market on this game." The researcher still decides which side, if any, to act on.
 
 ---
 
@@ -281,23 +298,26 @@ Five distinct types. Each type has exactly one job and lives in one layer.
 
 ---
 
-## Section 4: Proposed Module Structure
+## Section 4: Module Structure
 
-Target layout for the research and market layer. Modules marked [future] are not yet implemented. Nothing here needs to be built immediately.
+Modules marked [exists] are implemented and tested. Modules marked [future] are not yet built.
 
 ```
 frontend/lib/
 ├── gameFilters.ts           [exists] — filter logic (has injuries, has line move, etc.)
 ├── gameFlags.ts             [exists] — flag derivation (⚠ 📈 🌬)
 ├── gameFlagSummary.ts       [exists] — flag counts for the summary bar
-├── researchInsights.ts      [exists] — InsightGenerator registry; formVsMarketDivergence
+├── researchInsights.ts      [exists] — InsightGenerator registry; formVsMarketDivergence;
+│                                        recordVsRecentFormDivergence
+├── marketOpportunities.ts   [exists] — MarketOpportunity type; FULL_GAME_MONEYLINE only;
+│                                        formDivergenceToMoneyline generator
+├── marketResearchBoard.ts   [exists] — getBoardResearchUrl(); getMarketOpportunitiesForBoard()
 │
-├── marketOpportunities.ts   [future] — MarketOpportunity type; opportunity generators
 ├── parlayBuilder.ts         [future] — ParlayLeg; CorrelationWarning; active parlay state
 └── correlations.ts          [future] — known correlation rules, indexed by market pair
 ```
 
-**Growth rule:** each module has one job. `researchInsights.ts` surfaces patterns in game data. `marketOpportunities.ts` connects those patterns to specific bet legs. `parlayBuilder.ts` manages the researcher's active parlay. `correlations.ts` knows which legs reduce each other's independence.
+**Growth rule:** each module has one job. `researchInsights.ts` surfaces patterns in game data. `marketOpportunities.ts` connects those patterns to specific market types. `marketResearchBoard.ts` aggregates the full board view. `parlayBuilder.ts` manages the researcher's active parlay. `correlations.ts` knows which legs reduce each other's independence.
 
 No module reaches into another module's layer. Insights do not create MarketOpportunities. The parlay builder does not generate insights.
 
@@ -313,6 +333,8 @@ The most important architectural constraint in the project. This defines where t
 - Average implied probability across books — `researchInsights.ts` (working)
 - Win rate from recent form — `researchInsights.ts` (working)
 - Divergence between form and market pricing — `formVsMarketDivergence` (working)
+- Season win rate from wins/losses record string — `parseSeasonRecord()` in `researchInsights.ts` (working)
+- Divergence between season record and recent win rate — `recordVsRecentFormDivergence` (working)
 - Line movement delta — research endpoints (working)
 - Weather signals — weather data + thresholds (working)
 - Bullpen stress signals — bullpen context data (working, not yet an insight)
@@ -336,7 +358,9 @@ This system surfaces the raw inputs — the form, the price, the divergence, the
 
 ### On Confidence Levels
 
-The future `MarketOpportunity` type may carry a `confidence: "low" | "medium" | "high"` field. This is acceptable because it is ordinal, not quantitative. "Medium confidence" means "2–3 corroborating signals present, no major red flags" — not "58.3% implied true probability." The confidence level is defined by a count of supporting signals, which the researcher can inspect directly.
+The `MarketOpportunity` type does not include a `confidence` field. When MarketOpportunities were implemented in Phase 9, confidence ratings were intentionally omitted: they imply a model-backed probability estimate that the system does not calculate and does not attempt to calculate.
+
+If a confidence field is added in a future sprint it must be ordinal, not quantitative. "Medium confidence" would mean "2–3 corroborating signals present, no major red flags" — not "58.3% implied true probability." The level must be defined by a count of inspectable supporting signals, not a hidden calculation.
 
 ---
 
@@ -465,19 +489,11 @@ Reasoning: every parlay leg that involves a team winning begins with a full-game
 
 ## Section 8: Smallest Shippable Sprint
 
-**Sprint: Fix the game detail endpoint + two new insight generators**
+**Sprint: Two new insight generators** (Part A is complete — see note)
 
-### Part A — Fix the game detail endpoint to return form data
+### Part A — Fix the game detail endpoint to return form data ✅ COMPLETE (Phase 10)
 
-The `GET /research/game/{id}` endpoint currently omits team form, splits, and streak. Form-based insights never fire on the game detail page as a result.
-
-Fix: Update `_get_research_for_game()` in `backend/routers/research.py` to include the same form/splits/streak fields that `_get_research_for_date()` already returns. The data is already in the database; it's just not being selected by the game-level query.
-
-Files: `backend/routers/research.py`, `backend/tests/test_game_detail.py`
-Schema change: None required.
-Frontend change: None required — `InsightableGame` already accepts optional form fields.
-
-After this fix, form-based insights will fire correctly on the game detail page for the first time.
+The `GET /research/game/{id}` endpoint now returns the full form, splits, and streak fields. This was completed in Phase 10. Research Insights and Market Opportunities fire correctly on the Game Detail page. `backend/tests/test_game_detail.py` expanded to 11 tests covering form shape/values, streak shape/values, and splits shape/values.
 
 ### Part B — Bullpen Stress insight
 
