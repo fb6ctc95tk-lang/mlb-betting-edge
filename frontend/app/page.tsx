@@ -528,6 +528,10 @@ export default function Home() {
     <main style={{ padding: "2rem", fontFamily: "Arial, sans-serif" }}>
       <h1>MLB Betting Edge</h1>
 
+      <div style={{ marginBottom: "0.75rem", fontSize: "0.95em" }}>
+        <Link href="/opportunities">Market Research Board →</Link>
+      </div>
+
       <div style={{ display: "flex", gap: "1rem", flexWrap: "wrap" }}>
         <IngestionStatusCard />
         <DataQualityCard />
