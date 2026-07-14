@@ -386,11 +386,24 @@ This script is read-only. It does not write to the database, modify ingestion, o
 
 **Discovery: the API supports a `markets` parameter.** The production fetcher does not currently use it. When lines are posted, specifying `markets=totals` or `markets=ML,totals` may be the correct way to request totals data. This should be tested in the re-run.
 
-**Action required:** Re-run the diagnostic on July 16 or 17, 2026, once bookmakers post lines for the regular-season slate. This will produce a conclusive result.
+**Recheck run: 2026-07-14 (Phase 13 Sprint 2) — STILL INCONCLUSIVE**
+
+The diagnostic was re-run on 2026-07-14 as Phase 13 Sprint 2. A broader pre-flight scan of 50 events (July 16 – July 20) was conducted before running the script.
+
+- 50 events scanned across July 16–20: all returned empty `bookmakers: {}`
+- The script confirmed the first event (NYM @ PHI, July 16) still returns empty bookmakers
+- The rate limit was hit (HTTP 429) mid-run — the 50-event scan consumed ~50 of the 100 requests/hour budget
+- Steps 3 market parameter probes (`markets=totals`, `markets=ML,totals`) returned HTTP 429 due to the exhausted budget; their HTTP 200 behavior from Sprint 1 remains the last confirmed state
+
+**Why still inconclusive:** Lines have not opened for any post-break game as of the time of this test (~1:30 AM on July 14). Regular season resumes July 16. Bookmakers typically post lines for a series on game day or the day prior — not during the break itself.
+
+**Rate limit caution:** The 50-event pre-flight scan is expensive (50 API calls). Future re-runs should use the diagnostic script directly (approximately 5 calls total) rather than the broad event scan. The free tier allows 100 requests/hour.
+
+**Next valid recheck condition:** Run the diagnostic script on July 16, 2026 after the 11 AM scheduled ingestion fires and confirms non-empty odds in the log. If the log shows lines were saved, the diagnostic will have something to inspect. Do not run the broad 50-event scan again — use the script only.
 
 If totals appear: the path to Full-Game Totals research requires no provider change — only a schema addition and fetcher update.
 
-If totals do not appear: Full-Game Totals is blocked on a provider upgrade, exactly like every other non-ML market.
+If totals do not appear with active moneyline data present: Full-Game Totals is blocked on a provider upgrade, exactly like every other non-ML market.
 
 ### 6.3 What Definitely Requires a Provider Change
 
