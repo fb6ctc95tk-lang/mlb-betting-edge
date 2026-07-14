@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import type { CSSProperties } from "react";
-import { buildBoardEntries } from "../../lib/marketResearchBoard";
+import { buildBoardEntries, getBoardResearchUrl } from "../../lib/marketResearchBoard";
 import type { BoardEntry } from "../../lib/marketResearchBoard";
 
 type Odds = {
@@ -60,29 +60,102 @@ const cardBodyStyle: CSSProperties = {
   padding: "0.75rem 1rem",
 };
 
+function DateSelector({
+  selectedDate,
+  availableDates,
+  onSelect,
+}: {
+  selectedDate: string;
+  availableDates: string[];
+  onSelect: (date: string) => void;
+}) {
+  return (
+    <div
+      style={{
+        marginTop: "0.75rem",
+        display: "flex",
+        alignItems: "center",
+        gap: "0.75rem",
+        flexWrap: "wrap",
+      }}
+    >
+      <label htmlFor="board-date-picker" style={{ fontWeight: "bold" }}>
+        Date:
+      </label>
+      <select
+        id="board-date-picker"
+        value={selectedDate}
+        onChange={(e) => onSelect(e.target.value)}
+        style={{ padding: "4px", fontSize: "1rem" }}
+      >
+        <option value="">Today</option>
+        {availableDates.map((d) => (
+          <option key={d} value={d}>
+            {d}
+          </option>
+        ))}
+      </select>
+      {selectedDate && (
+        <button
+          onClick={() => onSelect("")}
+          style={{ padding: "4px 10px", cursor: "pointer" }}
+        >
+          Back to Today
+        </button>
+      )}
+    </div>
+  );
+}
+
 export default function MarketResearchBoardPage() {
   const [games, setGames] = useState<ResearchGame[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [selectedDate, setSelectedDate] = useState<string>("");
+  const [availableDates, setAvailableDates] = useState<string[]>([]);
 
   useEffect(() => {
     const apiUrl = process.env.NEXT_PUBLIC_API_URL;
-    fetch(`${apiUrl}/research/today`)
-      .then((res) => {
-        if (!res.ok) throw new Error(`Request failed (${res.status})`);
-        return res.json();
-      })
-      .then((data: ResearchGame[]) => setGames(data))
-      .catch((err: unknown) =>
-        setError(err instanceof Error ? err.message : "Unknown error")
-      );
+    fetch(`${apiUrl}/research/available-dates`)
+      .then((res) => res.json())
+      .then((data) => setAvailableDates(data.available_dates ?? []))
+      .catch(() => {});
   }, []);
+
+  useEffect(() => {
+    const apiUrl = process.env.NEXT_PUBLIC_API_URL ?? "";
+    const url = getBoardResearchUrl(apiUrl, selectedDate);
+
+    function loadGames() {
+      setGames(null);
+      setError(null);
+      fetch(url)
+        .then((res) => {
+          if (!res.ok) throw new Error(`Request failed (${res.status})`);
+          return res.json();
+        })
+        .then((data: ResearchGame[]) => setGames(data))
+        .catch((err: unknown) =>
+          setError(err instanceof Error ? err.message : "Unknown error")
+        );
+    }
+    loadGames();
+  }, [selectedDate]);
+
+  const dateLabel = selectedDate || "Today";
 
   if (error) {
     return (
       <main style={{ padding: "2rem", fontFamily: "Arial, sans-serif" }}>
         <Link href="/">← Dashboard</Link>
         <h1 style={{ marginTop: "1rem" }}>Market Research Board</h1>
-        <p style={{ color: "crimson", marginTop: "1rem" }}>Error loading data: {error}</p>
+        <DateSelector
+          selectedDate={selectedDate}
+          availableDates={availableDates}
+          onSelect={setSelectedDate}
+        />
+        <p style={{ color: "crimson", marginTop: "1rem" }}>
+          Error loading data for {dateLabel}: {error}
+        </p>
       </main>
     );
   }
@@ -92,12 +165,18 @@ export default function MarketResearchBoardPage() {
       <main style={{ padding: "2rem", fontFamily: "Arial, sans-serif" }}>
         <Link href="/">← Dashboard</Link>
         <h1 style={{ marginTop: "1rem" }}>Market Research Board</h1>
+        <DateSelector
+          selectedDate={selectedDate}
+          availableDates={availableDates}
+          onSelect={setSelectedDate}
+        />
         <p style={{ marginTop: "1rem" }}>Loading...</p>
       </main>
     );
   }
 
   const entries = buildBoardEntries(games);
+  const anyOdds = games.some((g) => g.odds.length > 0);
   const gameMap = new Map(games.map((g) => [String(g.game_id), g]));
 
   return (
@@ -105,6 +184,12 @@ export default function MarketResearchBoardPage() {
       <Link href="/">← Dashboard</Link>
 
       <h1 style={{ marginTop: "1rem" }}>Market Research Board</h1>
+
+      <DateSelector
+        selectedDate={selectedDate}
+        availableDates={availableDates}
+        onSelect={setSelectedDate}
+      />
 
       <p
         style={{
@@ -121,11 +206,19 @@ export default function MarketResearchBoardPage() {
       </p>
 
       {games.length === 0 && (
-        <p style={{ color: "#888" }}>No games found for today.</p>
+        <p style={{ color: "#888" }}>No games found for {dateLabel}.</p>
       )}
 
-      {games.length > 0 && entries.length === 0 && (
-        <p style={{ color: "#888" }}>No market opportunities found for today&apos;s slate.</p>
+      {games.length > 0 && entries.length === 0 && !anyOdds && (
+        <p style={{ color: "#888" }}>
+          No sportsbook odds available for {dateLabel}. Market opportunities require odds data.
+        </p>
+      )}
+
+      {games.length > 0 && entries.length === 0 && anyOdds && (
+        <p style={{ color: "#888" }}>
+          No market opportunities found for {dateLabel}.
+        </p>
       )}
 
       {entries.map((entry: BoardEntry, i: number) => {

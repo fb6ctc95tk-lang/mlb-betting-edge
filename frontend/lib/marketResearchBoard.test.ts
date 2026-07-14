@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { buildBoardEntries } from "./marketResearchBoard";
+import { buildBoardEntries, getBoardResearchUrl } from "./marketResearchBoard";
 import type { InsightableGame } from "./researchInsights";
 
 // Hot away team as underdog — triggers form-market-divergence insight + moneyline opportunity.
@@ -88,5 +88,43 @@ describe("buildBoardEntries", () => {
     expect(entry.opportunity).not.toHaveProperty("score");
     expect(entry.opportunity).not.toHaveProperty("confidence");
     expect(entry.opportunity).not.toHaveProperty("expectedValue");
+  });
+
+  it("opportunity has no team, side, or direction field", () => {
+    const [entry] = buildBoardEntries([gameWithOpportunity()]);
+    expect(entry.opportunity).not.toHaveProperty("team");
+    expect(entry.opportunity).not.toHaveProperty("side");
+    expect(entry.opportunity).not.toHaveProperty("direction");
+  });
+});
+
+describe("getBoardResearchUrl", () => {
+  it("returns /research/today when selectedDate is empty", () => {
+    expect(getBoardResearchUrl("http://localhost:8000", "")).toBe(
+      "http://localhost:8000/research/today"
+    );
+  });
+
+  it("returns /research/date/{date} when selectedDate is set", () => {
+    expect(getBoardResearchUrl("http://localhost:8000", "2026-06-20")).toBe(
+      "http://localhost:8000/research/date/2026-06-20"
+    );
+  });
+
+  it("returns /research/today after resetting selectedDate to empty (Back to Today)", () => {
+    expect(getBoardResearchUrl("http://localhost:8000", "")).toBe(
+      "http://localhost:8000/research/today"
+    );
+  });
+
+  it("uses the provided apiBase in the constructed URL", () => {
+    expect(getBoardResearchUrl("http://api.example.com:9000", "2026-07-05")).toBe(
+      "http://api.example.com:9000/research/date/2026-07-05"
+    );
+  });
+
+  it("empty historical result does not crash buildBoardEntries", () => {
+    expect(() => buildBoardEntries([])).not.toThrow();
+    expect(buildBoardEntries([])).toHaveLength(0);
   });
 });

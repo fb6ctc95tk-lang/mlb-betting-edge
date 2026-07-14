@@ -20,3 +20,14 @@ export function buildBoardEntries(games: InsightableGame[]): BoardEntry[] {
     }));
   });
 }
+
+/**
+ * Returns the API URL to load board data for a given date selection.
+ * An empty selectedDate means "today" — use /research/today.
+ * Any non-empty date string uses /research/date/{date}.
+ */
+export function getBoardResearchUrl(apiBase: string, selectedDate: string): string {
+  return selectedDate
+    ? `${apiBase}/research/date/${selectedDate}`
+    : `${apiBase}/research/today`;
+}
