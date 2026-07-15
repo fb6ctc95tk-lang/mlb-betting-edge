@@ -6,55 +6,61 @@ Daily ingestion pulls today's games, odds, and team records from external APIs a
 
 ---
 
-## Scheduled Task Setup (Windows Task Scheduler)
+## Scheduled Tasks
 
-Run this once in PowerShell as Administrator to register the task. Replace the path if your repo is in a different location.
+Two Task Scheduler jobs run ingestion daily:
 
-```powershell
-$repoRoot = "C:\Users\rich-\RICH-LABS\mlb-betting-edge"
-$bat      = "$repoRoot\backend\scripts\run_ingestion.bat"
+| Task Name | Schedule | Purpose |
+|---|---|---|
+| `MLB Ingestion 11AM` | Daily at 11:00 AM | Captures morning lines and day's game slate |
+| `MLB Ingestion 7PM` | Daily at 7:00 PM | Captures updated odds before evening games |
 
-$action  = New-ScheduledTaskAction -Execute "cmd.exe" -Argument "/c `"$bat`""
-$trigger = New-ScheduledTaskTrigger -Daily -At "8:00AM"
-$settings = New-ScheduledTaskSettingsSet `
-    -ExecutionTimeLimit (New-TimeSpan -Minutes 10) `
-    -StartWhenAvailable `
-    -RunOnlyIfNetworkAvailable
+Both tasks call the same wrapper: `backend\scripts\run_ingestion.bat`.
 
-Register-ScheduledTask `
-    -TaskName   "MLB-BettingEdge-Ingestion" `
-    -Action     $action `
-    -Trigger    $trigger `
-    -Settings   $settings `
-    -RunLevel   Highest `
-    -Description "Daily MLB game, odds, and team record ingestion"
-```
+### Required Configuration (S4U Logon Type)
 
-`-StartWhenAvailable` means if the machine was off at 8 AM, the task runs as soon as it boots up that day.
+Both tasks must be configured with **LogonType = S4U** (not Interactive). Interactive mode causes the task to fail with error `-2147020576` whenever no user session is active — for example, when the machine is sleeping or the screen is locked.
 
-### Verify the task was registered
+S4U allows the task to run under the `rich-` user account without an active desktop session. No stored password is required.
+
+To verify both tasks have the correct configuration:
 
 ```powershell
-Get-ScheduledTask -TaskName "MLB-BettingEdge-Ingestion" | Select-Object TaskName, State
+$t = Get-ScheduledTask -TaskName "MLB Ingestion 11AM"
+$t.Principal | Select-Object UserId, LogonType
+$t.Settings | Select-Object StartWhenAvailable
 ```
 
 Expected output:
-
 ```
-TaskName                     State
---------                     -----
-MLB-BettingEdge-Ingestion    Ready
+UserId  LogonType
+------  ---------
+rich-   S4U
+
+StartWhenAvailable
+------------------
+True
 ```
 
----
+Run the same check for `MLB Ingestion 7PM`.
 
-## Recommended Schedule
+### To re-register from scratch (if tasks are deleted)
 
-| Run time | Reason |
-|----------|--------|
-| **8:00 AM daily** | Captures overnight odds lines and the day's scheduled games before afternoon action begins |
+Run the following in an **elevated** PowerShell (Run as Administrator):
 
-If you want a second daily pull to capture late-breaking lineup and odds changes, add a second trigger at **12:00 PM**.
+```powershell
+$bat = "C:\Users\rich-\RICH-LABS\mlb-betting-edge\backend\scripts\run_ingestion.bat"
+$p   = New-ScheduledTaskPrincipal -UserId "RICH-LAB\rich-" -LogonType S4U -RunLevel Limited
+
+$action11  = New-ScheduledTaskAction -Execute $bat
+$trigger11 = New-ScheduledTaskTrigger -Daily -At "11:00AM"
+$settings  = New-ScheduledTaskSettingsSet -StartWhenAvailable -MultipleInstances IgnoreNew
+Register-ScheduledTask -TaskName "MLB Ingestion 11AM" -Action $action11 -Trigger $trigger11 -Settings $settings -Principal $p -Force
+
+$action7   = New-ScheduledTaskAction -Execute $bat
+$trigger7  = New-ScheduledTaskTrigger -Daily -At "7:00PM"
+Register-ScheduledTask -TaskName "MLB Ingestion 7PM" -Action $action7 -Trigger $trigger7 -Settings $settings -Principal $p -Force
+```
 
 ---
 
@@ -76,7 +82,7 @@ Or to pull data for a specific past date:
 To trigger the scheduled task manually without waiting for its schedule:
 
 ```powershell
-Start-ScheduledTask -TaskName "MLB-BettingEdge-Ingestion"
+schtasks /run /tn "MLB Ingestion 11AM"
 ```
 
 ---
@@ -86,16 +92,15 @@ Start-ScheduledTask -TaskName "MLB-BettingEdge-Ingestion"
 Logs are written to `logs/ingestion.log` at the repo root. Every run appends three sections:
 
 ```
-[2026-06-20 04:00:55] === INGESTION START ===
-Run started: 2026-06-20 04:00:56
+[2026-07-15 11:00:01] === INGESTION START ===
+Run started: 2026-07-15 11:00:02
 Fetching games for today from MLB Stats API...
   Found 14 games
 ...
 Saved 14 games
-Saved 14 starting pitcher rows (14 with a probable pitcher)
 Saved 30 team records
 Saved 14 odds rows
-[2026-06-20 04:00:58] === INGESTION END exit=0 ===
+[2026-07-15 11:00:18] === INGESTION END exit=0 ===
 ```
 
 **What to check:**
@@ -104,7 +109,7 @@ Saved 14 odds rows
 |------|--------------|
 | `INGESTION START` line | Present with today's date and a time |
 | `INGESTION END` line | Present, `exit=0` |
-| Games found | > 0 on game days (0 is normal on off-days) |
+| Games found | > 0 on game days (0 is normal on off-days and All-Star break) |
 | Team records | 30 |
 | Odds rows | Matches or is close to games count |
 
@@ -124,6 +129,19 @@ Select-String "INGESTION END" logs\ingestion.log | Select-Object -Last 1
 
 ## Troubleshooting
 
+### Task Last Result is -2147020576
+
+This means the task is configured as **Interactive only** and no user session was active when it fired. Fix:
+
+```powershell
+# Must run as Administrator
+$p = New-ScheduledTaskPrincipal -UserId "RICH-LAB\rich-" -LogonType S4U -RunLevel Limited
+Set-ScheduledTask -TaskName "MLB Ingestion 11AM" -Principal $p
+Set-ScheduledTask -TaskName "MLB Ingestion 7PM" -Principal $p
+```
+
+After applying, re-query to confirm `LogonType` shows `S4U` (displayed as `Interactive/Background` in schtasks output).
+
 ### `exit=1` — ingestion failed
 
 1. Open the log and read the lines between START and END for that run.
@@ -142,7 +160,7 @@ The task may have failed to launch the batch file. Check the Task Scheduler hist
 
 ```powershell
 Get-WinEvent -LogName "Microsoft-Windows-TaskScheduler/Operational" |
-    Where-Object { $_.Message -like "*MLB-BettingEdge*" } |
+    Where-Object { $_.Message -like "*MLB Ingestion*" } |
     Select-Object -First 10 TimeCreated, Message
 ```
 
@@ -150,17 +168,12 @@ Get-WinEvent -LogName "Microsoft-Windows-TaskScheduler/Operational" |
 
 ```powershell
 # Check task status
-Get-ScheduledTask -TaskName "MLB-BettingEdge-Ingestion"
+Get-ScheduledTask -TaskName "MLB Ingestion 11AM"
+Get-ScheduledTask -TaskName "MLB Ingestion 7PM"
 
 # Re-enable if disabled
-Enable-ScheduledTask -TaskName "MLB-BettingEdge-Ingestion"
-```
-
-### Remove and re-register the task
-
-```powershell
-Unregister-ScheduledTask -TaskName "MLB-BettingEdge-Ingestion" -Confirm:$false
-# Then re-run the registration block above
+Enable-ScheduledTask -TaskName "MLB Ingestion 11AM"
+Enable-ScheduledTask -TaskName "MLB Ingestion 7PM"
 ```
 
 ---
