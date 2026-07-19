@@ -26,7 +26,7 @@ if %NET_ATTEMPT% geq %NET_MAX% (
     exit /b 1
 )
 echo [%TS%] NETWORK WAIT: check %NET_ATTEMPT%/%NET_MAX% - not ready, retrying in 5s >> logs\ingestion.log
-timeout /t 5 /nobreak >nul
+ping 127.0.0.1 -n 6 -w 1000 >nul 2>&1
 goto WAIT_NETWORK
 
 :NETWORK_READY
@@ -58,7 +58,7 @@ echo [%TS%] INGESTION FAILED exit=%EXIT_CODE% (attempt %RUN_ATTEMPT%/%RUN_MAX%) 
 
 if %RUN_ATTEMPT% lss %RUN_MAX% (
     echo [%TS%] RETRY: waiting 120s before next attempt >> logs\ingestion.log
-    timeout /t 120 /nobreak >nul
+    ping 127.0.0.1 -n 121 -w 1000 >nul 2>&1
     goto RUN_INGESTION
 )
 
