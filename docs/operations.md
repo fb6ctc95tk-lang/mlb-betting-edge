@@ -32,6 +32,8 @@ Split-Path ... -Parent    → .../mlb-betting-edge   (repo root)
 
 All file paths — log file, Python executable, ingestion script — are built as absolute paths from the repo root.
 
+The script also sets its working directory to the repo root (`Set-Location -LiteralPath $repoRoot`) before invoking any child processes. This ensures that Python's `load_dotenv()` — called without an explicit path in `save_live_data.py` and some fetchers — resolves `.env` relative to the repo root rather than an arbitrary caller CWD.
+
 **Retry and timing behavior is unchanged:**
 - Network probe: ping 8.8.8.8, up to 12 attempts, 5s between failures
 - Ingestion retry: up to 3 attempts, 120s between failures

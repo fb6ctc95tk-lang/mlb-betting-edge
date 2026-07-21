@@ -17,6 +17,11 @@ function Write-Log {
 }
 
 try {
+    # Preserve historical repo-root working directory for Python child processes.
+    # save_live_data.py and its fetchers use load_dotenv() without an explicit
+    # path, which may resolve relative to CWD depending on the dotenv version.
+    Set-Location -LiteralPath $repoRoot
+
     # Ensure logs directory exists before first write
     $logsDir = Split-Path $logFile -Parent
     if (-not (Test-Path $logsDir)) {
@@ -62,10 +67,14 @@ try {
     for ($runAttempt = 1; $runAttempt -le $runMax; $runAttempt++) {
         Write-Log "=== INGESTION START (attempt $runAttempt/$runMax) ==="
 
-        # Invoke Python via cmd to get clean OS-level stdout+stderr append without
-        # PowerShell 5.1 stderr-wrapping behavior. cmd propagates Python's exit code.
-        cmd /c "`"$pythonExe`" `"$ingestScript`" >> `"$logFile`" 2>&1"
-        $exitCode = $LASTEXITCODE
+        # Invoke Python via cmd.exe using Start-Process so the argument string is
+        # appended to the process command line verbatim, bypassing PowerShell 5.1's
+        # native-argument quoting path. This correctly handles paths with spaces,
+        # uses OS-level stdout+stderr append, and propagates Python's exit code.
+        $proc = Start-Process -FilePath $env:COMSPEC `
+            -ArgumentList "/c `"$pythonExe`" `"$ingestScript`" >> `"$logFile`" 2>&1" `
+            -Wait -NoNewWindow -PassThru
+        $exitCode = $proc.ExitCode
 
         Write-Log "BACKEND EXIT=$exitCode"
 
