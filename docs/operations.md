@@ -2,7 +2,42 @@
 
 ## Overview
 
-Daily ingestion pulls today's games, odds, and team records from external APIs and saves them to the local PostgreSQL database. The ingestion script is `backend/scripts/save_live_data.py`, driven by the batch file `backend/scripts/run_ingestion.bat`.
+Daily ingestion pulls today's games, odds, and team records from external APIs and saves them to the local PostgreSQL database. The ingestion script is `backend/scripts/save_live_data.py`. It is driven by two files:
+
+- `backend/scripts/run_ingestion.bat` — scheduler-facing entry point; invokes the PowerShell script and exits with its code
+- `backend/scripts/run_ingestion.ps1` — owns all orchestration: network readiness, retry logic, logging, and ingestion execution
+
+---
+
+## Orchestration Architecture
+
+The batch file is a thin launcher. It passes control to `run_ingestion.ps1` and propagates the exit code to Task Scheduler:
+
+```batch
+@echo off
+powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%~dp0run_ingestion.ps1"
+set "WRAPPER_EXIT=%ERRORLEVEL%"
+exit /b %WRAPPER_EXIT%
+```
+
+The PowerShell script runs under **Windows PowerShell 5.1** (`powershell.exe`). The `-ExecutionPolicy Bypass` flag is process-scoped — it allows the local script to run without changing the machine or user execution policy.
+
+The script derives all paths from `$PSScriptRoot` (the directory containing `run_ingestion.ps1`), so it is path-independent and does not rely on the caller's working directory:
+
+```
+$PSScriptRoot             → .../mlb-betting-edge/backend/scripts
+Split-Path ... -Parent    → .../mlb-betting-edge/backend
+Split-Path ... -Parent    → .../mlb-betting-edge   (repo root)
+```
+
+All file paths — log file, Python executable, ingestion script — are built as absolute paths from the repo root.
+
+**Retry and timing behavior is unchanged:**
+- Network probe: ping 8.8.8.8, up to 12 attempts, 5s between failures
+- Ingestion retry: up to 3 attempts, 120s between failures
+- Exit codes: 0 (success), 1 (network failure or unexpected error), last backend code (permanent ingestion failure)
+
+**Scheduler configuration is unchanged.** Both tasks continue to call `run_ingestion.bat` using S4U logon.
 
 ---
 
