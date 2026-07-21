@@ -72,7 +72,7 @@ try {
         # native-argument quoting path. This correctly handles paths with spaces,
         # uses OS-level stdout+stderr append, and propagates Python's exit code.
         $proc = Start-Process -FilePath $env:COMSPEC `
-            -ArgumentList "/c `"$pythonExe`" `"$ingestScript`" >> `"$logFile`" 2>&1" `
+            -ArgumentList "/c `"`"$pythonExe`" `"$ingestScript`" >> `"$logFile`" 2>&1`"" `
             -Wait -NoNewWindow -PassThru
         $exitCode = $proc.ExitCode
 
