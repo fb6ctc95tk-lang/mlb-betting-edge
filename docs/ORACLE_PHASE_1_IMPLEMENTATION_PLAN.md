@@ -268,9 +268,9 @@ Phase 1 is organized into six work packages. The order of execution is constrain
 | State | Valid Transitions |
 |---|---|
 | `scheduled` | → `preliminary_analysis` |
-| `preliminary_analysis` | → `lineup_monitoring` \| `analysis_failed` |
+| `preliminary_analysis` | → `lineup_monitoring` |
 | `lineup_monitoring` | → `final_analysis` |
-| `final_analysis` | → `activation_eligible` \| `analysis_failed` |
+| `final_analysis` | → `activation_eligible` |
 | `activation_eligible` | → `pregame_locked` |
 | `pregame_locked` | → `settled` \| `voided` \| `postponed` |
 | `settled` | Terminal |

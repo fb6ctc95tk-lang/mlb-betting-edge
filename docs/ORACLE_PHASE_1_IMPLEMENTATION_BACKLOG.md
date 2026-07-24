@@ -765,9 +765,9 @@ Valid transitions per plan:
 
 Valid transitions per plan:
 - `scheduled` → `preliminary_analysis`
-- `preliminary_analysis` → `lineup_monitoring` | `analysis_failed`
+- `preliminary_analysis` → `lineup_monitoring`
 - `lineup_monitoring` → `final_analysis`
-- `final_analysis` → `activation_eligible` | `analysis_failed`
+- `final_analysis` → `activation_eligible`
 - `activation_eligible` → `pregame_locked`
 - `pregame_locked` → `settled` | `voided` | `postponed`
 - `settled`, `voided`, `postponed`: terminal
