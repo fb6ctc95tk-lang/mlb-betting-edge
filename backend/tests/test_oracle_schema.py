@@ -363,7 +363,8 @@ def test_fk_play_events_nullable_game_run_id_accepts_null(conn, seed_slate_run):
         (seed_slate_run,),
     )
     event_id = cur.fetchone()[0]
-    cur.execute("DELETE FROM oracle_play_events WHERE event_id = %s", (event_id,))
+    # DELETE blocked by append-only trigger (WP-2); TRUNCATE bypasses row-level triggers.
+    cur.execute("TRUNCATE oracle_play_events")
     cur.close()
     assert isinstance(event_id, int)
 
@@ -520,7 +521,8 @@ def test_jsonb_event_payload_insert_and_retrieve(conn, seed_slate_run):
         (seed_slate_run, json.dumps(payload)),
     )
     event_id, retrieved = cur.fetchone()
-    cur.execute("DELETE FROM oracle_play_events WHERE event_id = %s", (event_id,))
+    # DELETE blocked by append-only trigger (WP-2); TRUNCATE bypasses row-level triggers.
+    cur.execute("TRUNCATE oracle_play_events")
     cur.close()
     assert retrieved["confidence"] == 0.87
     assert retrieved["edge_pct"] == 4.2
@@ -544,7 +546,8 @@ def test_jsonb_event_payload_null_accepted(conn, seed_slate_run):
         (seed_slate_run,),
     )
     event_id, payload_val = cur.fetchone()
-    cur.execute("DELETE FROM oracle_play_events WHERE event_id = %s", (event_id,))
+    # DELETE blocked by append-only trigger (WP-2); TRUNCATE bypasses row-level triggers.
+    cur.execute("TRUNCATE oracle_play_events")
     cur.close()
     assert payload_val is None
 
@@ -565,7 +568,8 @@ def test_bigserial_event_id_auto_assigned(conn, seed_slate_run):
         (seed_slate_run,),
     )
     event_id = cur.fetchone()[0]
-    cur.execute("DELETE FROM oracle_play_events WHERE event_id = %s", (event_id,))
+    # DELETE blocked by append-only trigger (WP-2); TRUNCATE bypasses row-level triggers.
+    cur.execute("TRUNCATE oracle_play_events")
     cur.close()
     assert isinstance(event_id, int)
     assert event_id > 0
@@ -583,7 +587,8 @@ def test_bigserial_event_id_increments(conn, seed_slate_run):
         (seed_slate_run,),
     )
     id2 = cur.fetchone()[0]
-    cur.execute("DELETE FROM oracle_play_events WHERE event_id IN (%s, %s)", (id1, id2))
+    # DELETE blocked by append-only trigger (WP-2); TRUNCATE bypasses row-level triggers.
+    cur.execute("TRUNCATE oracle_play_events")
     cur.close()
     assert id2 > id1
 
