@@ -518,8 +518,8 @@ class TestSqlBehavior:
 # G. Integration tests — require ORACLE_TEST_DATABASE_URL
 # ---------------------------------------------------------------------------
 
-_SLATE_FOR_EVENTS = "ORACLE-20260725-WP5"
-_GAME_FOR_EVENTS = "ORACLE-20260725-WP5-BOS-NYY-746484"
+_SLATE_FOR_EVENTS = "ORACLE-20260725-999"
+_GAME_FOR_EVENTS = "ORACLE-20260725-999-BOS-NYY-746484"
 
 
 @pytest.fixture(scope="module")

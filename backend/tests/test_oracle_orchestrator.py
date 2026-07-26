@@ -1768,7 +1768,7 @@ class TestIntegrationFullPhase1Run:
         conn.rollback()
         cur = conn.cursor()
         try:
-            cur.execute("DELETE FROM oracle_play_events WHERE slate_run_id LIKE 'ORACLE-20260725-%'")
+            cur.execute("TRUNCATE oracle_play_events")
             cur.execute("DELETE FROM oracle_game_analyses WHERE slate_run_id LIKE 'ORACLE-20260725-%'")
             cur.execute("DELETE FROM oracle_slate_runs WHERE slate_run_id LIKE 'ORACLE-20260725-%'")
         finally:
