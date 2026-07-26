@@ -1,6 +1,10 @@
-"""Oracle Phase 1 WP-4 — Orchestrator Foundation tests (T01–T04).
+"""Oracle Phase 1 WP-4 — Orchestrator Foundation tests (T01–T04) and
+Run Orchestrator tests (T05–T08).
 
-All tests in this file are pure unit tests and run without a database.
+Sections A–L are pure unit tests (no database required).
+Sections M–U are unit tests that patch DB dependencies.
+Section V requires ORACLE_TEST_DATABASE_URL (integration tests).
+
 Sections:
     A. Kill Switch (T01)
     B. Slate State Machine — valid transitions (T02)
@@ -14,9 +18,23 @@ Sections:
     J. Fixture get_game_pk — WP-4 boundary conversion (T04)
     K. Fixture WP-3 integration — type compatibility (T04)
     L. Fixture connection invariants (T04)
+    M. Orchestrator imports and interface (T05–T08)
+    N. Kill switch enforcement in all stages (T05–T08)
+    O. Stage 1 — Slate Initialization unit tests (T05)
+    P. Stage 2 — Schedule Retrieval unit tests (T06)
+    Q. Stage 3 — Preliminary Data Gather stub unit tests (T07)
+    R. Stages 4–10 stub unit tests (T07)
+    S. Event ordering and correctness (T05–T08)
+    T. Transaction ownership (T05–T08)
+    U. Failure and kill switch propagation (T05–T08)
+    V. Integration tests — full Phase 1 run (T08, requires DB)
 """
 
 from __future__ import annotations
+
+import os
+from datetime import date, datetime, timezone
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 
@@ -39,6 +57,21 @@ from backend.oracle.state_machines import (
     InvalidStateTransitionError,
     transition_game_state,
     transition_slate_state,
+)
+from backend.oracle.orchestrator import (
+    KillSwitchHaltError,
+    OrchestratorError,
+    run_oracle_phase1,
+    run_stage_1,
+    run_stage_2,
+    run_stage_3,
+    run_stage_4,
+    run_stage_5,
+    run_stage_6,
+    run_stage_7,
+    run_stage_8,
+    run_stage_9,
+    run_stage_10,
 )
 
 
@@ -825,3 +858,1064 @@ class TestFixtureConnectionInvariants:
             validate_fixture_record(record)
             get_game_pk(record)
         assert not conn.rollback_called
+
+
+# ===========================================================================
+# T05–T08 infrastructure
+# ===========================================================================
+
+_TEST_DB_URL = os.getenv("ORACLE_TEST_DATABASE_URL")
+_requires_db = pytest.mark.skipif(
+    not _TEST_DB_URL,
+    reason="ORACLE_TEST_DATABASE_URL not set",
+)
+
+_ENABLED_ENV = {"ORACLE_AUTONOMOUS_RUN_ENABLED": "true"}
+_DISABLED_ENV: dict = {}
+_TEST_DATE = date(2026, 7, 25)
+_TEST_SLATE_ID = "ORACLE-20260725-001"
+_TEST_GAME_IDS = [
+    "ORACLE-20260725-001-BOS-NYY-746484",
+    "ORACLE-20260725-001-SFG-LAD-746485",
+]
+
+_PATCH_GENERATE_SLATE = "backend.oracle.orchestrator.generate_slate_run_id"
+_PATCH_RECORD_EVENT = "backend.oracle.orchestrator.record_event"
+_PATCH_GENERATE_GAME = "backend.oracle.orchestrator.generate_game_run_id"
+_PATCH_LOAD_FIXTURES = "backend.oracle.orchestrator.load_phase1_fixtures"
+_PATCH_GET_GAME_PK = "backend.oracle.orchestrator.get_game_pk"
+_PATCH_VALIDATE_FIXTURE = "backend.oracle.orchestrator.validate_fixture_record"
+_PATCH_TRANSITION_SLATE = "backend.oracle.orchestrator.transition_slate_state"
+_PATCH_TRANSITION_GAME = "backend.oracle.orchestrator.transition_game_state"
+
+_FIXTURE_RECORDS = [
+    {
+        "external_game_id": "746484",
+        "home_team": "NYY",
+        "away_team": "BOS",
+        "first_pitch_time": "2026-07-25T17:10:00Z",
+        "venue": "Yankee Stadium",
+    },
+    {
+        "external_game_id": "746485",
+        "home_team": "LAD",
+        "away_team": "SFG",
+        "first_pitch_time": "2026-07-25T22:10:00Z",
+        "venue": "Dodger Stadium",
+    },
+]
+
+
+class _MockCursor:
+    """Minimal cursor that records SQL and params; supports close()."""
+
+    def __init__(self) -> None:
+        self.sql_log: list[str] = []
+        self.params_log: list = []
+        self.closed = False
+
+    def execute(self, sql: str, params=None) -> None:
+        self.sql_log.append(sql.strip())
+        self.params_log.append(params)
+
+    def fetchone(self):
+        return None
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _StageConn:
+    """Mock psycopg2 connection for orchestrator unit tests.
+
+    autocommit=False so _require_manual_transaction() does not raise when
+    called by patched functions that have been replaced but whose callers
+    (like _update_slate_status) still use conn.cursor() directly.
+    """
+
+    def __init__(self) -> None:
+        self.autocommit = False
+        self.cursors: list[_MockCursor] = []
+        self.commit_count = 0
+        self.rollback_count = 0
+        self.close_count = 0
+
+    def cursor(self) -> _MockCursor:
+        cur = _MockCursor()
+        self.cursors.append(cur)
+        return cur
+
+    def commit(self) -> None:
+        self.commit_count += 1
+
+    def rollback(self) -> None:
+        self.rollback_count += 1
+
+    def close(self) -> None:
+        self.close_count += 1
+
+    @property
+    def commit_called(self) -> bool:
+        return self.commit_count > 0
+
+    @property
+    def rollback_called(self) -> bool:
+        return self.rollback_count > 0
+
+
+# ---------------------------------------------------------------------------
+# M. Orchestrator imports and interface
+# ---------------------------------------------------------------------------
+
+class TestOrchestratorInterface:
+    """M — Public surface of backend.oracle.orchestrator."""
+
+    def test_orchestrator_error_is_importable(self):
+        assert OrchestratorError is not None
+
+    def test_orchestrator_error_is_exception_subclass(self):
+        assert issubclass(OrchestratorError, Exception)
+
+    def test_kill_switch_halt_error_is_importable(self):
+        assert KillSwitchHaltError is not None
+
+    def test_kill_switch_halt_error_is_orchestrator_error(self):
+        assert issubclass(KillSwitchHaltError, OrchestratorError)
+
+    def test_kill_switch_halt_error_is_exception_subclass(self):
+        assert issubclass(KillSwitchHaltError, Exception)
+
+    def test_run_stage_1_is_callable(self):
+        assert callable(run_stage_1)
+
+    def test_run_stage_2_is_callable(self):
+        assert callable(run_stage_2)
+
+    def test_run_stage_3_through_10_are_callable(self):
+        for fn in (run_stage_3, run_stage_4, run_stage_5,
+                   run_stage_6, run_stage_7, run_stage_8,
+                   run_stage_9, run_stage_10):
+            assert callable(fn)
+
+    def test_run_oracle_phase1_is_callable(self):
+        assert callable(run_oracle_phase1)
+
+    def test_kill_switch_halt_error_can_be_raised_and_caught_as_orchestrator_error(self):
+        with pytest.raises(OrchestratorError):
+            raise KillSwitchHaltError("test")
+
+
+# ---------------------------------------------------------------------------
+# N. Kill switch enforcement in all stages
+# ---------------------------------------------------------------------------
+
+class TestKillSwitchEnforcementInStages:
+    """N — Every stage gate raises KillSwitchHaltError when disabled."""
+
+    def _conn(self):
+        return _StageConn()
+
+    def test_stage1_raises_when_kill_switch_disabled(self):
+        with pytest.raises(KillSwitchHaltError):
+            run_stage_1(self._conn(), _TEST_DATE, env=_DISABLED_ENV)
+
+    def test_stage2_raises_when_kill_switch_disabled(self):
+        with pytest.raises(KillSwitchHaltError):
+            run_stage_2(self._conn(), _TEST_SLATE_ID, env=_DISABLED_ENV)
+
+    def test_stage3_raises_when_kill_switch_disabled(self):
+        with pytest.raises(KillSwitchHaltError):
+            run_stage_3(self._conn(), _TEST_SLATE_ID, _TEST_GAME_IDS, env=_DISABLED_ENV)
+
+    def test_stage4_raises_when_kill_switch_disabled(self):
+        with pytest.raises(KillSwitchHaltError):
+            run_stage_4(self._conn(), _TEST_SLATE_ID, _TEST_GAME_IDS, env=_DISABLED_ENV)
+
+    def test_stage5_raises_when_kill_switch_disabled(self):
+        with pytest.raises(KillSwitchHaltError):
+            run_stage_5(self._conn(), _TEST_SLATE_ID, _TEST_GAME_IDS, env=_DISABLED_ENV)
+
+    def test_stage6_raises_when_kill_switch_disabled(self):
+        with pytest.raises(KillSwitchHaltError):
+            run_stage_6(self._conn(), _TEST_SLATE_ID, _TEST_GAME_IDS, env=_DISABLED_ENV)
+
+    def test_stage7_raises_when_kill_switch_disabled(self):
+        with pytest.raises(KillSwitchHaltError):
+            run_stage_7(self._conn(), _TEST_SLATE_ID, _TEST_GAME_IDS, env=_DISABLED_ENV)
+
+    def test_stage8_raises_when_kill_switch_disabled(self):
+        with pytest.raises(KillSwitchHaltError):
+            run_stage_8(self._conn(), _TEST_SLATE_ID, _TEST_GAME_IDS, env=_DISABLED_ENV)
+
+    def test_stage9_raises_when_kill_switch_disabled(self):
+        with pytest.raises(KillSwitchHaltError):
+            run_stage_9(self._conn(), _TEST_SLATE_ID, _TEST_GAME_IDS, env=_DISABLED_ENV)
+
+    def test_stage10_raises_when_kill_switch_disabled(self):
+        with pytest.raises(KillSwitchHaltError):
+            run_stage_10(self._conn(), _TEST_SLATE_ID, _TEST_GAME_IDS, env=_DISABLED_ENV)
+
+    def test_run_oracle_phase1_raises_when_kill_switch_disabled(self):
+        with pytest.raises(KillSwitchHaltError):
+            run_oracle_phase1(self._conn(), _TEST_DATE, env=_DISABLED_ENV)
+
+    def test_stage1_kill_switch_check_precedes_any_db_call(self):
+        conn = _StageConn()
+        with pytest.raises(KillSwitchHaltError):
+            run_stage_1(conn, _TEST_DATE, env=_DISABLED_ENV)
+        assert len(conn.cursors) == 0
+
+    def test_stage2_kill_switch_check_precedes_any_db_call(self):
+        conn = _StageConn()
+        with pytest.raises(KillSwitchHaltError):
+            run_stage_2(conn, _TEST_SLATE_ID, env=_DISABLED_ENV)
+        assert len(conn.cursors) == 0
+
+    def test_stage3_kill_switch_check_precedes_any_db_call(self):
+        conn = _StageConn()
+        with pytest.raises(KillSwitchHaltError):
+            run_stage_3(conn, _TEST_SLATE_ID, _TEST_GAME_IDS, env=_DISABLED_ENV)
+        assert len(conn.cursors) == 0
+
+
+# ---------------------------------------------------------------------------
+# O. Stage 1 — Slate Initialization unit tests
+# ---------------------------------------------------------------------------
+
+class TestStage1SlateInitialization:
+    """O — Stage 1 unit tests with generate_slate_run_id and record_event patched."""
+
+    def _run(self, conn=None, env=_ENABLED_ENV):
+        if conn is None:
+            conn = _StageConn()
+        with patch(_PATCH_GENERATE_SLATE, return_value=_TEST_SLATE_ID), \
+             patch(_PATCH_RECORD_EVENT, return_value=1):
+            return run_stage_1(conn, _TEST_DATE, env=env), conn
+
+    def test_returns_slate_run_id_string(self):
+        result, _ = self._run()
+        assert result == _TEST_SLATE_ID
+
+    def test_returns_string_type(self):
+        result, _ = self._run()
+        assert isinstance(result, str)
+
+    def test_inserts_into_oracle_slate_runs(self):
+        _, conn = self._run()
+        insert_sqls = [s for c in conn.cursors for s in c.sql_log if "oracle_slate_runs" in s.lower() and "INSERT" in s.upper()]
+        assert len(insert_sqls) == 1
+
+    def test_insert_includes_slate_run_id(self):
+        _, conn = self._run()
+        insert_cursor = next(c for c in conn.cursors if any("INSERT" in s.upper() and "oracle_slate_runs" in s.lower() for s in c.sql_log))
+        assert _TEST_SLATE_ID in insert_cursor.params_log[0]
+
+    def test_insert_includes_initializing_status(self):
+        _, conn = self._run()
+        insert_cursor = next(c for c in conn.cursors if any("INSERT" in s.upper() and "oracle_slate_runs" in s.lower() for s in c.sql_log))
+        assert "initializing" in insert_cursor.params_log[0]
+
+    def test_insert_includes_zero_daily_plays_activated(self):
+        _, conn = self._run()
+        insert_cursor = next(c for c in conn.cursors if any("INSERT" in s.upper() and "oracle_slate_runs" in s.lower() for s in c.sql_log))
+        assert 0 in insert_cursor.params_log[0]
+
+    def test_insert_includes_run_date(self):
+        _, conn = self._run()
+        insert_cursor = next(c for c in conn.cursors if any("INSERT" in s.upper() and "oracle_slate_runs" in s.lower() for s in c.sql_log))
+        assert _TEST_DATE in insert_cursor.params_log[0]
+
+    def test_updates_slate_status_to_schedule_loaded(self):
+        _, conn = self._run()
+        update_sqls = [s for c in conn.cursors for s in c.sql_log if "UPDATE" in s.upper() and "oracle_slate_runs" in s.lower()]
+        assert len(update_sqls) == 1
+        update_cursor = next(c for c in conn.cursors if any("UPDATE" in s.upper() and "oracle_slate_runs" in s.lower() for s in c.sql_log))
+        assert "schedule_loaded" in update_cursor.params_log[0]
+
+    def test_calls_record_event_with_slate_initialized(self):
+        conn = _StageConn()
+        with patch(_PATCH_GENERATE_SLATE, return_value=_TEST_SLATE_ID) as _gs, \
+             patch(_PATCH_RECORD_EVENT, return_value=1) as mock_re:
+            run_stage_1(conn, _TEST_DATE, env=_ENABLED_ENV)
+        assert mock_re.call_args[0][1] == "slate_initialized"
+
+    def test_record_event_receives_conn_as_first_arg(self):
+        conn = _StageConn()
+        with patch(_PATCH_GENERATE_SLATE, return_value=_TEST_SLATE_ID), \
+             patch(_PATCH_RECORD_EVENT, return_value=1) as mock_re:
+            run_stage_1(conn, _TEST_DATE, env=_ENABLED_ENV)
+        assert mock_re.call_args[0][0] is conn
+
+    def test_record_event_receives_slate_run_id(self):
+        conn = _StageConn()
+        with patch(_PATCH_GENERATE_SLATE, return_value=_TEST_SLATE_ID), \
+             patch(_PATCH_RECORD_EVENT, return_value=1) as mock_re:
+            run_stage_1(conn, _TEST_DATE, env=_ENABLED_ENV)
+        assert mock_re.call_args[0][2] == _TEST_SLATE_ID
+
+    def test_calls_commit_exactly_once(self):
+        _, conn = self._run()
+        assert conn.commit_count == 1
+
+    def test_does_not_call_rollback(self):
+        _, conn = self._run()
+        assert not conn.rollback_called
+
+    def test_does_not_close_connection(self):
+        _, conn = self._run()
+        assert conn.close_count == 0
+
+    def test_all_cursors_are_closed(self):
+        _, conn = self._run()
+        assert all(c.closed for c in conn.cursors)
+
+    def test_generate_slate_run_id_exception_does_not_commit(self):
+        conn = _StageConn()
+        with patch(_PATCH_GENERATE_SLATE, side_effect=RuntimeError("db error")):
+            with pytest.raises(RuntimeError):
+                run_stage_1(conn, _TEST_DATE, env=_ENABLED_ENV)
+        assert not conn.commit_called
+
+    def test_record_event_exception_does_not_commit(self):
+        conn = _StageConn()
+        with patch(_PATCH_GENERATE_SLATE, return_value=_TEST_SLATE_ID), \
+             patch(_PATCH_RECORD_EVENT, side_effect=ValueError("bad event")):
+            with pytest.raises(ValueError):
+                run_stage_1(conn, _TEST_DATE, env=_ENABLED_ENV)
+        assert not conn.commit_called
+
+
+# ---------------------------------------------------------------------------
+# P. Stage 2 — Schedule Retrieval unit tests
+# ---------------------------------------------------------------------------
+
+class TestStage2ScheduleRetrieval:
+    """P — Stage 2 unit tests with load_phase1_fixtures, record_event patched."""
+
+    def _run(self, conn=None, env=_ENABLED_ENV):
+        if conn is None:
+            conn = _StageConn()
+        with patch(_PATCH_LOAD_FIXTURES, return_value=_FIXTURE_RECORDS), \
+             patch(_PATCH_VALIDATE_FIXTURE), \
+             patch(_PATCH_GET_GAME_PK, side_effect=lambda r: int(r["external_game_id"])), \
+             patch(_PATCH_GENERATE_GAME, side_effect=lambda s, a, h, pk: f"{s}-{a}-{h}-{pk}"), \
+             patch(_PATCH_RECORD_EVENT, return_value=1) as mock_re:
+            result = run_stage_2(conn, _TEST_SLATE_ID, env=env)
+        return result, conn, mock_re
+
+    def test_returns_list(self):
+        result, _, _ = self._run()
+        assert isinstance(result, list)
+
+    def test_returns_two_game_run_ids(self):
+        result, _, _ = self._run()
+        assert len(result) == 2
+
+    def test_game_run_ids_contain_slate_run_id(self):
+        result, _, _ = self._run()
+        for gid in result:
+            assert _TEST_SLATE_ID in gid
+
+    def test_inserts_game_analyses_for_each_fixture(self):
+        _, conn, _ = self._run()
+        inserts = [s for c in conn.cursors for s in c.sql_log if "INSERT" in s.upper() and "oracle_game_analyses" in s.lower()]
+        assert len(inserts) == 2
+
+    def test_game_analyses_include_scheduled_status(self):
+        _, conn, _ = self._run()
+        game_cursors = [c for c in conn.cursors if any("oracle_game_analyses" in s.lower() for s in c.sql_log)]
+        for c in game_cursors:
+            assert "scheduled" in c.params_log[0]
+
+    def test_game_analyses_include_slate_run_id(self):
+        _, conn, _ = self._run()
+        game_cursors = [c for c in conn.cursors if any("oracle_game_analyses" in s.lower() for s in c.sql_log)]
+        for c in game_cursors:
+            assert _TEST_SLATE_ID in c.params_log[0]
+
+    def test_writes_schedule_retrieved_event(self):
+        _, _, mock_re = self._run()
+        event_types = [c[0][1] for c in mock_re.call_args_list]
+        assert "schedule_retrieved" in event_types
+
+    def test_writes_game_analysis_started_per_game(self):
+        _, _, mock_re = self._run()
+        event_types = [c[0][1] for c in mock_re.call_args_list]
+        assert event_types.count("game_analysis_started") == 2
+
+    def test_schedule_retrieved_before_first_game_analysis_started(self):
+        _, _, mock_re = self._run()
+        event_types = [c[0][1] for c in mock_re.call_args_list]
+        sr_idx = event_types.index("schedule_retrieved")
+        ga_idx = event_types.index("game_analysis_started")
+        assert sr_idx < ga_idx
+
+    def test_updates_slate_status_to_analysis_in_progress(self):
+        _, conn, _ = self._run()
+        update_cursor = next(c for c in conn.cursors if any("UPDATE" in s.upper() and "oracle_slate_runs" in s.lower() for s in c.sql_log))
+        assert "analysis_in_progress" in update_cursor.params_log[0]
+
+    def test_calls_commit_exactly_once(self):
+        _, conn, _ = self._run()
+        assert conn.commit_count == 1
+
+    def test_does_not_call_rollback(self):
+        _, conn, _ = self._run()
+        assert not conn.rollback_called
+
+    def test_does_not_close_connection(self):
+        _, conn, _ = self._run()
+        assert conn.close_count == 0
+
+    def test_all_cursors_are_closed(self):
+        _, conn, _ = self._run()
+        assert all(c.closed for c in conn.cursors)
+
+
+# ---------------------------------------------------------------------------
+# Q. Stage 3 — Preliminary Data Gather stub unit tests
+# ---------------------------------------------------------------------------
+
+class TestStage3PreliminaryDataGather:
+    """Q — Stage 3 stub: no events; game state scheduled→preliminary_analysis."""
+
+    def _run(self, conn=None, env=_ENABLED_ENV):
+        if conn is None:
+            conn = _StageConn()
+        with patch(_PATCH_RECORD_EVENT, return_value=1) as mock_re:
+            result = run_stage_3(conn, _TEST_SLATE_ID, _TEST_GAME_IDS, env=env)
+        return result, conn, mock_re
+
+    def test_returns_none(self):
+        result, _, _ = self._run()
+        assert result is None
+
+    def test_writes_no_events(self):
+        _, _, mock_re = self._run()
+        mock_re.assert_not_called()
+
+    def test_updates_game_status_to_preliminary_analysis_per_game(self):
+        _, conn, _ = self._run()
+        update_cursors = [c for c in conn.cursors if any("UPDATE" in s.upper() and "oracle_game_analyses" in s.lower() for s in c.sql_log)]
+        assert len(update_cursors) == 2
+        for c in update_cursors:
+            assert "preliminary_analysis" in c.params_log[0]
+
+    def test_commits_exactly_once(self):
+        _, conn, _ = self._run()
+        assert conn.commit_count == 1
+
+    def test_does_not_rollback(self):
+        _, conn, _ = self._run()
+        assert not conn.rollback_called
+
+
+# ---------------------------------------------------------------------------
+# R. Stages 4–10 stub unit tests
+# ---------------------------------------------------------------------------
+
+class TestStage4EcfCalculation:
+    """R — Stage 4 stub: ecf_calculated per game; no state transition."""
+
+    def _run(self, conn=None, env=_ENABLED_ENV):
+        if conn is None:
+            conn = _StageConn()
+        with patch(_PATCH_RECORD_EVENT, return_value=1) as mock_re:
+            run_stage_4(conn, _TEST_SLATE_ID, _TEST_GAME_IDS, env=env)
+        return conn, mock_re
+
+    def test_writes_ecf_calculated_per_game(self):
+        _, mock_re = self._run()
+        event_types = [c[0][1] for c in mock_re.call_args_list]
+        assert event_types.count("ecf_calculated") == 2
+
+    def test_ecf_calculated_includes_game_run_id(self):
+        _, mock_re = self._run()
+        for c in mock_re.call_args_list:
+            assert c[1].get("game_run_id") is not None or c[0][4] is not None
+
+    def test_commits_exactly_once(self):
+        conn, _ = self._run()
+        assert conn.commit_count == 1
+
+    def test_no_game_status_update_cursors(self):
+        conn, _ = self._run()
+        update_cursors = [c for c in conn.cursors if any("UPDATE" in s.upper() for s in c.sql_log)]
+        assert len(update_cursors) == 0
+
+
+class TestStage5IntelligencePipeline:
+    """R — Stage 5 stub: 6 pipeline events per game; game→lineup_monitoring."""
+
+    _EXPECTED_ORDER = (
+        "phie_completed", "gse_completed", "mve_completed",
+        "ce_completed", "odg_completed", "srl_completed",
+    )
+
+    def _run(self, conn=None, env=_ENABLED_ENV):
+        if conn is None:
+            conn = _StageConn()
+        with patch(_PATCH_RECORD_EVENT, return_value=1) as mock_re:
+            run_stage_5(conn, _TEST_SLATE_ID, _TEST_GAME_IDS, env=env)
+        return conn, mock_re
+
+    def test_writes_six_pipeline_events_per_game(self):
+        _, mock_re = self._run()
+        assert mock_re.call_count == 12
+
+    def test_pipeline_event_order_per_game(self):
+        _, mock_re = self._run()
+        game1_events = [c[0][1] for c in mock_re.call_args_list[:6]]
+        assert game1_events == list(self._EXPECTED_ORDER)
+
+    def test_phie_is_first_event_per_game(self):
+        _, mock_re = self._run()
+        assert mock_re.call_args_list[0][0][1] == "phie_completed"
+
+    def test_srl_is_last_event_per_game(self):
+        _, mock_re = self._run()
+        assert mock_re.call_args_list[5][0][1] == "srl_completed"
+
+    def test_updates_game_status_to_lineup_monitoring(self):
+        conn, _ = self._run()
+        update_cursors = [c for c in conn.cursors if any("UPDATE" in s.upper() and "oracle_game_analyses" in s.lower() for s in c.sql_log)]
+        assert len(update_cursors) == 2
+        for c in update_cursors:
+            assert "lineup_monitoring" in c.params_log[0]
+
+    def test_commits_exactly_once(self):
+        conn, _ = self._run()
+        assert conn.commit_count == 1
+
+    def test_does_not_rollback(self):
+        conn, _ = self._run()
+        assert not conn.rollback_called
+
+
+class TestStage6LineupMonitoring:
+    """R — Stage 6 stub: lineup_observation_recorded per game; no state change."""
+
+    def _run(self, conn=None, env=_ENABLED_ENV):
+        if conn is None:
+            conn = _StageConn()
+        with patch(_PATCH_RECORD_EVENT, return_value=1) as mock_re:
+            run_stage_6(conn, _TEST_SLATE_ID, _TEST_GAME_IDS, env=env)
+        return conn, mock_re
+
+    def test_writes_lineup_observation_recorded_per_game(self):
+        _, mock_re = self._run()
+        event_types = [c[0][1] for c in mock_re.call_args_list]
+        assert event_types.count("lineup_observation_recorded") == 2
+
+    def test_no_game_status_update(self):
+        conn, _ = self._run()
+        update_cursors = [c for c in conn.cursors if any("UPDATE" in s.upper() for s in c.sql_log)]
+        assert len(update_cursors) == 0
+
+    def test_commits_exactly_once(self):
+        conn, _ = self._run()
+        assert conn.commit_count == 1
+
+
+class TestStage7FinalAnalysis:
+    """R — Stage 7 stub: recalculation_triggered per game; game→final_analysis."""
+
+    def _run(self, conn=None, env=_ENABLED_ENV):
+        if conn is None:
+            conn = _StageConn()
+        with patch(_PATCH_RECORD_EVENT, return_value=1) as mock_re:
+            run_stage_7(conn, _TEST_SLATE_ID, _TEST_GAME_IDS, env=env)
+        return conn, mock_re
+
+    def test_writes_recalculation_triggered_per_game(self):
+        _, mock_re = self._run()
+        event_types = [c[0][1] for c in mock_re.call_args_list]
+        assert event_types.count("recalculation_triggered") == 2
+
+    def test_updates_game_status_to_final_analysis(self):
+        conn, _ = self._run()
+        update_cursors = [c for c in conn.cursors if any("UPDATE" in s.upper() and "oracle_game_analyses" in s.lower() for s in c.sql_log)]
+        for c in update_cursors:
+            assert "final_analysis" in c.params_log[0]
+
+    def test_commits_exactly_once(self):
+        conn, _ = self._run()
+        assert conn.commit_count == 1
+
+    def test_does_not_rollback(self):
+        conn, _ = self._run()
+        assert not conn.rollback_called
+
+
+class TestStage8ActivationWindow:
+    """R — Stage 8 stub: candidate_created per game; game→activation_eligible; slate→activation_window_open."""
+
+    def _run(self, conn=None, env=_ENABLED_ENV):
+        if conn is None:
+            conn = _StageConn()
+        with patch(_PATCH_RECORD_EVENT, return_value=1) as mock_re:
+            run_stage_8(conn, _TEST_SLATE_ID, _TEST_GAME_IDS, env=env)
+        return conn, mock_re
+
+    def test_writes_candidate_created_per_game(self):
+        _, mock_re = self._run()
+        event_types = [c[0][1] for c in mock_re.call_args_list]
+        assert event_types.count("candidate_created") == 2
+
+    def test_updates_game_status_to_activation_eligible(self):
+        conn, _ = self._run()
+        game_updates = [c for c in conn.cursors if any("UPDATE" in s.upper() and "oracle_game_analyses" in s.lower() for s in c.sql_log)]
+        for c in game_updates:
+            assert "activation_eligible" in c.params_log[0]
+
+    def test_updates_slate_status_to_activation_window_open(self):
+        conn, _ = self._run()
+        slate_updates = [c for c in conn.cursors if any("UPDATE" in s.upper() and "oracle_slate_runs" in s.lower() for s in c.sql_log)]
+        assert len(slate_updates) == 1
+        assert "activation_window_open" in slate_updates[0].params_log[0]
+
+    def test_commits_exactly_once(self):
+        conn, _ = self._run()
+        assert conn.commit_count == 1
+
+    def test_does_not_rollback(self):
+        conn, _ = self._run()
+        assert not conn.rollback_called
+
+
+class TestStage9PregameLock:
+    """R — Stage 9 stub: play_locked per game; game→pregame_locked; slate→pregame_locked."""
+
+    def _run(self, conn=None, env=_ENABLED_ENV):
+        if conn is None:
+            conn = _StageConn()
+        with patch(_PATCH_RECORD_EVENT, return_value=1) as mock_re:
+            run_stage_9(conn, _TEST_SLATE_ID, _TEST_GAME_IDS, env=env)
+        return conn, mock_re
+
+    def test_writes_play_locked_per_game(self):
+        _, mock_re = self._run()
+        event_types = [c[0][1] for c in mock_re.call_args_list]
+        assert event_types.count("play_locked") == 2
+
+    def test_updates_game_status_to_pregame_locked(self):
+        conn, _ = self._run()
+        game_updates = [c for c in conn.cursors if any("UPDATE" in s.upper() and "oracle_game_analyses" in s.lower() for s in c.sql_log)]
+        for c in game_updates:
+            assert "pregame_locked" in c.params_log[0]
+
+    def test_updates_slate_status_to_pregame_locked(self):
+        conn, _ = self._run()
+        slate_updates = [c for c in conn.cursors if any("UPDATE" in s.upper() and "oracle_slate_runs" in s.lower() for s in c.sql_log)]
+        assert len(slate_updates) == 1
+        assert "pregame_locked" in slate_updates[0].params_log[0]
+
+    def test_commits_exactly_once(self):
+        conn, _ = self._run()
+        assert conn.commit_count == 1
+
+
+class TestStage10Settlement:
+    """R — Stage 10 stub: settlement_completed per game; game→settled; slate→settled."""
+
+    def _run(self, conn=None, env=_ENABLED_ENV):
+        if conn is None:
+            conn = _StageConn()
+        with patch(_PATCH_RECORD_EVENT, return_value=1) as mock_re:
+            run_stage_10(conn, _TEST_SLATE_ID, _TEST_GAME_IDS, env=env)
+        return conn, mock_re
+
+    def test_writes_settlement_completed_per_game(self):
+        _, mock_re = self._run()
+        event_types = [c[0][1] for c in mock_re.call_args_list]
+        assert event_types.count("settlement_completed") == 2
+
+    def test_updates_game_status_to_settled(self):
+        conn, _ = self._run()
+        game_updates = [c for c in conn.cursors if any("UPDATE" in s.upper() and "oracle_game_analyses" in s.lower() for s in c.sql_log)]
+        for c in game_updates:
+            assert "settled" in c.params_log[0]
+
+    def test_updates_slate_status_to_settled(self):
+        conn, _ = self._run()
+        slate_updates = [c for c in conn.cursors if any("UPDATE" in s.upper() and "oracle_slate_runs" in s.lower() for s in c.sql_log)]
+        assert len(slate_updates) == 1
+        assert "settled" in slate_updates[0].params_log[0]
+
+    def test_commits_exactly_once(self):
+        conn, _ = self._run()
+        assert conn.commit_count == 1
+
+    def test_does_not_rollback(self):
+        conn, _ = self._run()
+        assert not conn.rollback_called
+
+
+# ---------------------------------------------------------------------------
+# S. Event ordering and correctness
+# ---------------------------------------------------------------------------
+
+class TestEventOrderingAndCorrectness:
+    """S — Cross-stage event ordering, counts, and type correctness."""
+
+    def test_stage1_writes_only_slate_initialized(self):
+        conn = _StageConn()
+        with patch(_PATCH_GENERATE_SLATE, return_value=_TEST_SLATE_ID), \
+             patch(_PATCH_RECORD_EVENT, return_value=1) as mock_re:
+            run_stage_1(conn, _TEST_DATE, env=_ENABLED_ENV)
+        assert mock_re.call_count == 1
+        assert mock_re.call_args[0][1] == "slate_initialized"
+
+    def test_stage2_writes_exactly_three_events_for_two_fixtures(self):
+        conn = _StageConn()
+        with patch(_PATCH_LOAD_FIXTURES, return_value=_FIXTURE_RECORDS), \
+             patch(_PATCH_VALIDATE_FIXTURE), \
+             patch(_PATCH_GET_GAME_PK, side_effect=lambda r: int(r["external_game_id"])), \
+             patch(_PATCH_GENERATE_GAME, side_effect=lambda s, a, h, pk: f"{s}-{a}-{h}-{pk}"), \
+             patch(_PATCH_RECORD_EVENT, return_value=1) as mock_re:
+            run_stage_2(conn, _TEST_SLATE_ID, env=_ENABLED_ENV)
+        assert mock_re.call_count == 3
+
+    def test_stage2_schedule_retrieved_is_event_index_0(self):
+        conn = _StageConn()
+        with patch(_PATCH_LOAD_FIXTURES, return_value=_FIXTURE_RECORDS), \
+             patch(_PATCH_VALIDATE_FIXTURE), \
+             patch(_PATCH_GET_GAME_PK, side_effect=lambda r: int(r["external_game_id"])), \
+             patch(_PATCH_GENERATE_GAME, side_effect=lambda s, a, h, pk: f"{s}-{a}-{h}-{pk}"), \
+             patch(_PATCH_RECORD_EVENT, return_value=1) as mock_re:
+            run_stage_2(conn, _TEST_SLATE_ID, env=_ENABLED_ENV)
+        assert mock_re.call_args_list[0][0][1] == "schedule_retrieved"
+
+    def test_stage3_writes_no_events(self):
+        conn = _StageConn()
+        with patch(_PATCH_RECORD_EVENT, return_value=1) as mock_re:
+            run_stage_3(conn, _TEST_SLATE_ID, _TEST_GAME_IDS, env=_ENABLED_ENV)
+        mock_re.assert_not_called()
+
+    def test_stage4_writes_exactly_two_events(self):
+        conn = _StageConn()
+        with patch(_PATCH_RECORD_EVENT, return_value=1) as mock_re:
+            run_stage_4(conn, _TEST_SLATE_ID, _TEST_GAME_IDS, env=_ENABLED_ENV)
+        assert mock_re.call_count == 2
+
+    def test_stage5_writes_twelve_events_total(self):
+        conn = _StageConn()
+        with patch(_PATCH_RECORD_EVENT, return_value=1) as mock_re:
+            run_stage_5(conn, _TEST_SLATE_ID, _TEST_GAME_IDS, env=_ENABLED_ENV)
+        assert mock_re.call_count == 12
+
+    def test_stage5_all_six_pipeline_event_types_present(self):
+        conn = _StageConn()
+        with patch(_PATCH_RECORD_EVENT, return_value=1) as mock_re:
+            run_stage_5(conn, _TEST_SLATE_ID, _TEST_GAME_IDS, env=_ENABLED_ENV)
+        seen = {c[0][1] for c in mock_re.call_args_list}
+        expected = {"phie_completed", "gse_completed", "mve_completed",
+                    "ce_completed", "odg_completed", "srl_completed"}
+        assert seen == expected
+
+
+# ---------------------------------------------------------------------------
+# T. Transaction ownership
+# ---------------------------------------------------------------------------
+
+class TestTransactionOwnership:
+    """T — Orchestrator owns commit; WP-3/WP-5 must not commit (DCR-W5-001 §6-8)."""
+
+    def test_stage1_connection_autocommit_remains_false_after_run(self):
+        conn = _StageConn()
+        with patch(_PATCH_GENERATE_SLATE, return_value=_TEST_SLATE_ID), \
+             patch(_PATCH_RECORD_EVENT, return_value=1):
+            run_stage_1(conn, _TEST_DATE, env=_ENABLED_ENV)
+        assert conn.autocommit is False
+
+    def test_stage2_connection_autocommit_remains_false_after_run(self):
+        conn = _StageConn()
+        with patch(_PATCH_LOAD_FIXTURES, return_value=_FIXTURE_RECORDS), \
+             patch(_PATCH_VALIDATE_FIXTURE), \
+             patch(_PATCH_GET_GAME_PK, side_effect=lambda r: int(r["external_game_id"])), \
+             patch(_PATCH_GENERATE_GAME, side_effect=lambda s, a, h, pk: f"{s}-{a}-{h}-{pk}"), \
+             patch(_PATCH_RECORD_EVENT, return_value=1):
+            run_stage_2(conn, _TEST_SLATE_ID, env=_ENABLED_ENV)
+        assert conn.autocommit is False
+
+    def test_stage1_commits_after_update_not_before(self):
+        """UPDATE must precede commit — verify at least one cursor exists before commit."""
+        conn = _StageConn()
+        commit_call_order = []
+        original_commit = conn.commit
+
+        def tracking_commit():
+            commit_call_order.append(("commit", len(conn.cursors)))
+            original_commit()
+
+        conn.commit = tracking_commit
+        with patch(_PATCH_GENERATE_SLATE, return_value=_TEST_SLATE_ID), \
+             patch(_PATCH_RECORD_EVENT, return_value=1):
+            run_stage_1(conn, _TEST_DATE, env=_ENABLED_ENV)
+        assert commit_call_order[0][1] >= 2
+
+    def test_stage3_commits_separately_from_stage4(self):
+        conn = _StageConn()
+        with patch(_PATCH_RECORD_EVENT, return_value=1):
+            run_stage_3(conn, _TEST_SLATE_ID, _TEST_GAME_IDS, env=_ENABLED_ENV)
+        commit_after_stage3 = conn.commit_count
+        with patch(_PATCH_RECORD_EVENT, return_value=1):
+            run_stage_4(conn, _TEST_SLATE_ID, _TEST_GAME_IDS, env=_ENABLED_ENV)
+        assert conn.commit_count == commit_after_stage3 + 1
+
+    def test_stage1_does_not_close_connection(self):
+        conn = _StageConn()
+        with patch(_PATCH_GENERATE_SLATE, return_value=_TEST_SLATE_ID), \
+             patch(_PATCH_RECORD_EVENT, return_value=1):
+            run_stage_1(conn, _TEST_DATE, env=_ENABLED_ENV)
+        assert conn.close_count == 0
+
+    def test_stage2_does_not_close_connection(self):
+        conn = _StageConn()
+        with patch(_PATCH_LOAD_FIXTURES, return_value=_FIXTURE_RECORDS), \
+             patch(_PATCH_VALIDATE_FIXTURE), \
+             patch(_PATCH_GET_GAME_PK, side_effect=lambda r: int(r["external_game_id"])), \
+             patch(_PATCH_GENERATE_GAME, side_effect=lambda s, a, h, pk: f"{s}-{a}-{h}-{pk}"), \
+             patch(_PATCH_RECORD_EVENT, return_value=1):
+            run_stage_2(conn, _TEST_SLATE_ID, env=_ENABLED_ENV)
+        assert conn.close_count == 0
+
+    def test_all_stage_cursors_are_closed(self):
+        """Verify try/finally cursor close in _update_slate_status and _update_game_status."""
+        conn = _StageConn()
+        with patch(_PATCH_RECORD_EVENT, return_value=1):
+            run_stage_7(conn, _TEST_SLATE_ID, _TEST_GAME_IDS, env=_ENABLED_ENV)
+        assert all(c.closed for c in conn.cursors)
+
+    def test_stage10_closes_all_cursors(self):
+        conn = _StageConn()
+        with patch(_PATCH_RECORD_EVENT, return_value=1):
+            run_stage_10(conn, _TEST_SLATE_ID, _TEST_GAME_IDS, env=_ENABLED_ENV)
+        assert all(c.closed for c in conn.cursors)
+
+
+# ---------------------------------------------------------------------------
+# U. Failure and kill switch propagation
+# ---------------------------------------------------------------------------
+
+class TestFailureAndKillSwitchPropagation:
+    """U — Exceptions propagate unchanged; kill switch raises before DB ops."""
+
+    def test_stage1_kill_switch_raises_before_generate_slate_run_id(self):
+        conn = _StageConn()
+        with patch(_PATCH_GENERATE_SLATE) as mock_gs:
+            with pytest.raises(KillSwitchHaltError):
+                run_stage_1(conn, _TEST_DATE, env=_DISABLED_ENV)
+        mock_gs.assert_not_called()
+
+    def test_stage2_kill_switch_raises_before_load_fixtures(self):
+        with patch(_PATCH_LOAD_FIXTURES) as mock_lf:
+            with pytest.raises(KillSwitchHaltError):
+                run_stage_2(_StageConn(), _TEST_SLATE_ID, env=_DISABLED_ENV)
+        mock_lf.assert_not_called()
+
+    def test_stage4_kill_switch_raises_before_record_event(self):
+        with patch(_PATCH_RECORD_EVENT) as mock_re:
+            with pytest.raises(KillSwitchHaltError):
+                run_stage_4(_StageConn(), _TEST_SLATE_ID, _TEST_GAME_IDS, env=_DISABLED_ENV)
+        mock_re.assert_not_called()
+
+    def test_stage5_kill_switch_raises_before_record_event(self):
+        with patch(_PATCH_RECORD_EVENT) as mock_re:
+            with pytest.raises(KillSwitchHaltError):
+                run_stage_5(_StageConn(), _TEST_SLATE_ID, _TEST_GAME_IDS, env=_DISABLED_ENV)
+        mock_re.assert_not_called()
+
+    def test_stage8_kill_switch_raises_before_record_event(self):
+        with patch(_PATCH_RECORD_EVENT) as mock_re:
+            with pytest.raises(KillSwitchHaltError):
+                run_stage_8(_StageConn(), _TEST_SLATE_ID, _TEST_GAME_IDS, env=_DISABLED_ENV)
+        mock_re.assert_not_called()
+
+    def test_stage1_runtime_error_propagates_unchanged(self):
+        conn = _StageConn()
+        with patch(_PATCH_GENERATE_SLATE, side_effect=RuntimeError("sentinel")):
+            with pytest.raises(RuntimeError, match="sentinel"):
+                run_stage_1(conn, _TEST_DATE, env=_ENABLED_ENV)
+
+    def test_kill_switch_halt_error_is_catchable_as_orchestrator_error(self):
+        with pytest.raises(OrchestratorError):
+            run_stage_1(_StageConn(), _TEST_DATE, env=_DISABLED_ENV)
+
+    def test_stage1_insert_exception_does_not_commit(self):
+        conn = _StageConn()
+        with patch(_PATCH_GENERATE_SLATE, return_value=_TEST_SLATE_ID), \
+             patch(_PATCH_RECORD_EVENT, side_effect=Exception("record_event failed")):
+            with pytest.raises(Exception):
+                run_stage_1(conn, _TEST_DATE, env=_ENABLED_ENV)
+        assert not conn.commit_called
+
+
+# ---------------------------------------------------------------------------
+# V. Integration tests — full Phase 1 run (requires ORACLE_TEST_DATABASE_URL)
+# ---------------------------------------------------------------------------
+
+class TestIntegrationFullPhase1Run:
+    """V — End-to-end Phase 1 run against a real PostgreSQL schema."""
+
+    @pytest.fixture(autouse=True)
+    def db_conn(self):
+        """Open connection, yield, then delete all test records and close."""
+        import psycopg2
+        conn = psycopg2.connect(_TEST_DB_URL)
+        conn.autocommit = False
+        yield conn
+        conn.rollback()
+        cur = conn.cursor()
+        try:
+            cur.execute("DELETE FROM oracle_play_events WHERE slate_run_id LIKE 'ORACLE-20260725-%'")
+            cur.execute("DELETE FROM oracle_game_analyses WHERE slate_run_id LIKE 'ORACLE-20260725-%'")
+            cur.execute("DELETE FROM oracle_slate_runs WHERE slate_run_id LIKE 'ORACLE-20260725-%'")
+        finally:
+            cur.close()
+        conn.commit()
+        conn.close()
+
+    @_requires_db
+    def test_run_oracle_phase1_returns_slate_run_id(self, db_conn):
+        result = run_oracle_phase1(db_conn, _TEST_DATE, env=_ENABLED_ENV)
+        assert isinstance(result, str)
+        assert result.startswith("ORACLE-20260725-")
+
+    @_requires_db
+    def test_slate_run_id_matches_oracle_format(self, db_conn):
+        import re
+        result = run_oracle_phase1(db_conn, _TEST_DATE, env=_ENABLED_ENV)
+        assert re.match(r"^ORACLE-\d{8}-\d{3}$", result)
+
+    @_requires_db
+    def test_oracle_slate_runs_record_exists_after_run(self, db_conn):
+        slate_id = run_oracle_phase1(db_conn, _TEST_DATE, env=_ENABLED_ENV)
+        cur = db_conn.cursor()
+        try:
+            cur.execute("SELECT run_status FROM oracle_slate_runs WHERE slate_run_id = %s", (slate_id,))
+            row = cur.fetchone()
+        finally:
+            cur.close()
+        assert row is not None
+
+    @_requires_db
+    def test_slate_final_status_is_settled(self, db_conn):
+        slate_id = run_oracle_phase1(db_conn, _TEST_DATE, env=_ENABLED_ENV)
+        cur = db_conn.cursor()
+        try:
+            cur.execute("SELECT run_status FROM oracle_slate_runs WHERE slate_run_id = %s", (slate_id,))
+            row = cur.fetchone()
+        finally:
+            cur.close()
+        assert row[0] == "settled"
+
+    @_requires_db
+    def test_oracle_game_analyses_two_records_created(self, db_conn):
+        slate_id = run_oracle_phase1(db_conn, _TEST_DATE, env=_ENABLED_ENV)
+        cur = db_conn.cursor()
+        try:
+            cur.execute("SELECT COUNT(*) FROM oracle_game_analyses WHERE slate_run_id = %s", (slate_id,))
+            count = cur.fetchone()[0]
+        finally:
+            cur.close()
+        assert count == 2
+
+    @_requires_db
+    def test_game_final_status_is_settled(self, db_conn):
+        slate_id = run_oracle_phase1(db_conn, _TEST_DATE, env=_ENABLED_ENV)
+        cur = db_conn.cursor()
+        try:
+            cur.execute(
+                "SELECT game_status FROM oracle_game_analyses WHERE slate_run_id = %s ORDER BY game_run_id",
+                (slate_id,),
+            )
+            rows = cur.fetchall()
+        finally:
+            cur.close()
+        assert all(r[0] == "settled" for r in rows)
+
+    @_requires_db
+    def test_slate_initialized_event_written(self, db_conn):
+        slate_id = run_oracle_phase1(db_conn, _TEST_DATE, env=_ENABLED_ENV)
+        cur = db_conn.cursor()
+        try:
+            cur.execute(
+                "SELECT COUNT(*) FROM oracle_play_events WHERE slate_run_id = %s AND event_type = 'slate_initialized'",
+                (slate_id,),
+            )
+            count = cur.fetchone()[0]
+        finally:
+            cur.close()
+        assert count == 1
+
+    @_requires_db
+    def test_game_analysis_started_events_written_per_game(self, db_conn):
+        slate_id = run_oracle_phase1(db_conn, _TEST_DATE, env=_ENABLED_ENV)
+        cur = db_conn.cursor()
+        try:
+            cur.execute(
+                "SELECT COUNT(*) FROM oracle_play_events WHERE slate_run_id = %s AND event_type = 'game_analysis_started'",
+                (slate_id,),
+            )
+            count = cur.fetchone()[0]
+        finally:
+            cur.close()
+        assert count == 2
+
+    @_requires_db
+    def test_settlement_completed_events_written_per_game(self, db_conn):
+        slate_id = run_oracle_phase1(db_conn, _TEST_DATE, env=_ENABLED_ENV)
+        cur = db_conn.cursor()
+        try:
+            cur.execute(
+                "SELECT COUNT(*) FROM oracle_play_events WHERE slate_run_id = %s AND event_type = 'settlement_completed'",
+                (slate_id,),
+            )
+            count = cur.fetchone()[0]
+        finally:
+            cur.close()
+        assert count == 2
+
+    @_requires_db
+    def test_schedule_retrieved_event_written(self, db_conn):
+        slate_id = run_oracle_phase1(db_conn, _TEST_DATE, env=_ENABLED_ENV)
+        cur = db_conn.cursor()
+        try:
+            cur.execute(
+                "SELECT COUNT(*) FROM oracle_play_events WHERE slate_run_id = %s AND event_type = 'schedule_retrieved'",
+                (slate_id,),
+            )
+            count = cur.fetchone()[0]
+        finally:
+            cur.close()
+        assert count == 1
+
+    @_requires_db
+    def test_run_blocked_when_kill_switch_disabled(self, db_conn):
+        with pytest.raises(KillSwitchHaltError):
+            run_oracle_phase1(db_conn, _TEST_DATE, env=_DISABLED_ENV)
+        cur = db_conn.cursor()
+        try:
+            cur.execute(
+                "SELECT COUNT(*) FROM oracle_slate_runs WHERE run_date = %s",
+                (_TEST_DATE,),
+            )
+            count = cur.fetchone()[0]
+        finally:
+            cur.close()
+        assert count == 0
+
+    @_requires_db
+    def test_daily_plays_activated_is_zero_after_run(self, db_conn):
+        slate_id = run_oracle_phase1(db_conn, _TEST_DATE, env=_ENABLED_ENV)
+        cur = db_conn.cursor()
+        try:
+            cur.execute(
+                "SELECT daily_plays_activated FROM oracle_slate_runs WHERE slate_run_id = %s",
+                (slate_id,),
+            )
+            val = cur.fetchone()[0]
+        finally:
+            cur.close()
+        assert val == 0

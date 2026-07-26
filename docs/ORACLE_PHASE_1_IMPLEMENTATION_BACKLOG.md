@@ -840,6 +840,8 @@ Stage 1 sequence:
 4. Write `slate_initialized` event to Event Store
 5. Transition slate status to `schedule_loaded` via state machine (Stage 2 will follow)
 
+**Transaction:** Stage 1 executes as one atomic caller-owned transaction per DCR-W5-001 §10. Steps 2–5 above (advisory lock, SELECT COUNT, `oracle_slate_runs` INSERT, `slate_initialized` event INSERT, and `run_status` UPDATE) all execute within the same transaction. The Orchestrator commits after all succeed. The advisory lock is released at commit. A failure in any step leaves no committed records.
+
 **Dependencies:** P1-WP4-T01 (kill switch reader); P1-WP4-T02 (slate-level state machine); P1-WP3-T02 (Slate Run ID generator); P1-WP5-T02 (Event Store write function — required before events can be written)
 
 **Repository areas affected:** `backend/oracle/orchestrator.py` (new file)
@@ -877,6 +879,8 @@ Stage 2 sequence:
 5. Write `game_analysis_started` event for each game to Event Store
 6. Transition slate status from `schedule_loaded` to `analysis_in_progress` via state machine
 
+**Transaction:** Stage 2 executes as an independent caller-owned transaction per DCR-W4-007 §4. All `oracle_game_analyses` INSERTs, Event Store writes, and the `run_status` UPDATE execute within one transaction. The Orchestrator commits after all Stage 2 operations succeed. A Stage 2 failure before commit leaves no committed Stage 2 records; Stage 1's committed records remain durable.
+
 **Dependencies:** P1-WP4-T05 (Stage 1 implemented; `oracle_slate_runs` record must exist before Stage 2 runs); P1-WP4-T04 (fixture loader); P1-WP3-T03 (Game Analysis Run ID generator); P1-WP5-T02 (Event Store write function)
 
 **Repository areas affected:** `backend/oracle/orchestrator.py`
@@ -906,6 +910,8 @@ Stage 2 sequence:
 | **Complexity** | M |
 
 **Description:** Implement Stages 3 through 10 as stubs. Each stub: (1) checks the kill switch; (2) logs the stage invocation; (3) writes the appropriate event type(s) to the Event Store; (4) transitions the relevant state machine; (5) returns without calling any provider, engine, or LLM.
+
+**Transaction:** Each of Stages 3–10 executes as an independent caller-owned transaction per DCR-W4-007 §4. Within each stage, all Event Store writes and state UPDATE writes execute within one transaction. The Orchestrator commits after all operations for that stage succeed. A failure before commit leaves that stage uncommitted; all previously committed stages remain durable. No transaction spans more than one stage.
 
 Stage stubs and their events:
 - Stage 3 (Preliminary Data Gather): writes `game_analysis_started` per game (if not already written); stub logs that data gather is deferred to Phase 2

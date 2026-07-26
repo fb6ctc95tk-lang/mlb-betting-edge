@@ -280,6 +280,13 @@ Phase 1 is organized into six work packages. The order of execution is constrain
 **Phase 1 stage execution (stubs):**
 In Phase 1, all stages including and beyond Schedule Retrieval are stubs. They do not call any external provider. Schedule and game data is supplied via injected test fixtures. Stage 2 creates `oracle_game_analyses` records from fixture data — not from a live MLB Stats API call. All stages log their invocation, write the appropriate event type to `oracle_play_events`, and transition state. No provider or engine is invoked.
 
+**Transaction and connection model (DCR-W5-001, DCR-W4-007):**
+
+The Orchestrator is the sole owner of the database connection, all transactions, all commits, and all rollbacks. No WP-3 or WP-5 function commits, rolls back, or closes the connection.
+
+- **Stage 1** executes as one atomic transaction as defined by DCR-W5-001 §10. The Orchestrator commits after advisory lock acquisition, Slate Run ID generation, `oracle_slate_runs` INSERT, `slate_initialized` event INSERT, and `run_status` UPDATE all succeed. The advisory lock is released at this commit.
+- **Stages 2–10** each execute as an independent caller-owned transaction (DCR-W4-007 §4). The Orchestrator commits after all database operations for that stage — INSERTs, Event Store writes, and state UPDATE writes — succeed. A stage failure before commit leaves that stage's partial work uncommitted; previously committed stages remain durable. No transaction spans more than one stage.
+
 **Acceptance criteria:**
 - Kill switch (`ORACLE_AUTONOMOUS_RUN_ENABLED = false`) halts Orchestrator before Stage 2; no records written beyond the kill switch check
 - Kill switch (`ORACLE_AUTONOMOUS_RUN_ENABLED = true`) allows Orchestrator to proceed
