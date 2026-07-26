@@ -327,8 +327,10 @@ immutability_violation_rejected
 - `event_timestamp`: TIMESTAMPTZ; always stored in UTC; never inferred — always passed explicitly
 - `event_payload`: JSONB; structured data specific to the event type; schema defined per event type in Phase 3+
 
-**Service contract:**
-- `record_event(event_type, slate_run_id, event_timestamp, game_run_id=None, play_id=None, payload=None) -> event_id`
+**Service contract (updated per DCR-W5-001):**
+- `record_event(conn, event_type, slate_run_id, event_timestamp, game_run_id=None, play_id=None, payload=None) -> event_id`
+- `conn`: caller-supplied psycopg2 connection; autocommit must be disabled; the Event Store creates and closes cursors only — it does not commit, roll back, or close the caller's connection
+- Transaction ownership: caller; WP-4 Stage 1 combines Slate Run ID generation, `oracle_slate_runs` INSERT, and `slate_initialized` event INSERT within one atomic transaction using this model
 - Raises `ValueError` if `event_type` is not one of the 27 defined types
 - Raises `ValueError` if `slate_run_id` is not a valid Slate Run ID format
 - Attempts INSERT; does not attempt UPDATE or DELETE

@@ -1020,11 +1020,13 @@ Tests per plan Section 6.4:
 | **Status** | Not Started |
 | **Complexity** | M |
 
-**Description:** Implement the `record_event()` function per the plan Section 2 WP-5 service contract:
+**Description:** Implement the `record_event()` function per the plan Section 2 WP-5 service contract (updated per DCR-W5-001):
 
-`record_event(event_type, slate_run_id, event_timestamp, game_run_id=None, play_id=None, payload=None) -> event_id`
+`record_event(conn, event_type, slate_run_id, event_timestamp, game_run_id=None, play_id=None, payload=None) -> event_id`
 
 Behavior:
+- `conn` is a caller-supplied psycopg2 connection with autocommit disabled; the Event Store creates and closes cursors only — it does not commit, roll back, or close the caller's connection
+- Transaction ownership: caller; WP-4 Stage 1 combines Slate Run ID generation, `oracle_slate_runs` INSERT, and `slate_initialized` event INSERT within one atomic transaction using this model (see DCR-W5-001 §10)
 - Validates `event_type` against the 27-type registry; raises `ValueError` if unknown (before any database call)
 - Validates `slate_run_id` format using the Identifier Manager's `is_valid_slate_run_id()`; raises `ValueError` if invalid
 - Performs INSERT into `oracle_play_events` with the provided fields; `event_id` is auto-assigned by the database (BIGSERIAL)
@@ -1062,10 +1064,12 @@ This function is the only path through which Oracle events reach `oracle_play_ev
 **Description:** Execute the unit test portion of the WP-5 test suite. Unit tests cover validation logic without requiring database access. These tests can run without a live PostgreSQL instance.
 
 Tests per plan Section 6.5:
-1. All 27 event types individually accepted (no database call needed for this validation test — can be tested against the registry check alone)
+1. All 27 event types individually accepted (raises no `ValueError` — validation check only, before any cursor operation)
 2. Unknown event type (`"invented_event_type"`) raises `ValueError` before any database call
 3. Malformed `slate_run_id` (e.g., `"ORACLE-2026-1"`) raises `ValueError` before any database call
 4. Static code inspection confirms no UPDATE or DELETE statements in `event_store.py`
+
+**Connection requirement for unit tests (DCR-W5-001 §12):** Tests 1–3 call `record_event()` with a lightweight mock connection object, consistent with the WP-3 unit test pattern (`_MockCursor` / mock connection in `test_oracle_identifier_manager.py`). No live database is accessed; `ValueError` is raised before any cursor operation. No `ORACLE_TEST_DATABASE_URL` required for these tests.
 
 **Dependencies:** P1-WP5-T02
 
