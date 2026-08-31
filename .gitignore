@@ -8,6 +8,7 @@
 .env
 backend/.env
 frontend/.env.local
+.claude/settings.local.json
 
 # ----- PYTHON -----
 __pycache__/
