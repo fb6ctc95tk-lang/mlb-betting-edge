@@ -16,7 +16,7 @@ from backend.oracle.identifier_manager import (
 
 
 # ---------------------------------------------------------------------------
-# Event type registry — 28 approved types (DCR-W5-001 §15; enumeration is
+# Event type registry — 30 approved types (DCR-W5-001 §15; enumeration is
 # authoritative despite planning text labelling the list as "27")
 # ---------------------------------------------------------------------------
 
@@ -35,6 +35,8 @@ _EVENT_TYPES: frozenset[str] = frozenset({
     "candidate_reentered",
     "evaluation_version_created",
     "recalculation_triggered",
+    "stale_hold_created",
+    "stale_hold_disposed",
     "lineup_observation_recorded",
     "lineup_confirmed",
     "lineup_change_detected",
