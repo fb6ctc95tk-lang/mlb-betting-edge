@@ -1,0 +1,36 @@
+# Enforce LF line endings in the repository for all text files.
+# Windows checkout: *.bat and *.ps1 use CRLF (native to Windows tooling).
+* text=auto eol=lf
+
+*.py      text eol=lf
+*.ts      text eol=lf
+*.tsx     text eol=lf
+*.js      text eol=lf
+*.jsx     text eol=lf
+*.mjs     text eol=lf
+*.css     text eol=lf
+*.md      text eol=lf
+*.json    text eol=lf
+*.yaml    text eol=lf
+*.yml     text eol=lf
+*.sql     text eol=lf
+*.txt     text eol=lf
+*.csv     text eol=lf
+*.sh      text eol=lf
+*.env     text eol=lf
+*.toml    text eol=lf
+
+*.bat     text eol=crlf
+*.cmd     text eol=crlf
+*.ps1     text eol=crlf
+
+*.ico     binary
+*.png     binary
+*.jpg     binary
+*.jpeg    binary
+*.gif     binary
+*.woff    binary
+*.woff2   binary
+*.ttf     binary
+*.eot     binary
+*.otf     binary
