@@ -1,0 +1,9 @@
+repos:
+  - repo: local
+    hooks:
+      - id: oracle-fingerprint-guard
+        name: Verify Oracle source fingerprints
+        language: system
+        pass_filenames: false
+        always_run: true
+        entry: bash -c 'printf "a2d4b43ea60fcead411d0087f7053109325a91a69907624586abe670ed936977  backend/oracle/adapter_interface.py\n86ada9410b282d8760c8581f29b87cc5a77ad6a6a491a3be6301ed65e686656b  backend/oracle/sport_policy_store.py\n8a3c4f9177b070a2b2ba9ce9960536232dcddc6ffd2645e1fc8b8fc184bd76cd  backend/oracle/consumer_admin_interface.py\nd5593c94255a286bb20c2b507620287da048132d38b2b9d78ae87c74b77adfb9  backend/oracle/event_store.py\n" | sha256sum --check'
