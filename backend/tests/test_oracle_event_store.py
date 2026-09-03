@@ -130,6 +130,8 @@ _APPROVED_EVENT_TYPES: frozenset[str] = frozenset({
     "candidate_reentered",
     "evaluation_version_created",
     "recalculation_triggered",
+    "stale_hold_created",
+    "stale_hold_disposed",
     "lineup_observation_recorded",
     "lineup_confirmed",
     "lineup_change_detected",
@@ -148,8 +150,8 @@ _APPROVED_EVENT_TYPES: frozenset[str] = frozenset({
 
 
 class TestEventTypeRegistry:
-    def test_registry_contains_exactly_28_types(self):
-        assert len(_EVENT_TYPES) == 28
+    def test_registry_contains_exactly_30_types(self):
+        assert len(_EVENT_TYPES) == 30
 
     def test_registry_matches_approved_enumeration(self):
         assert _EVENT_TYPES == _APPROVED_EVENT_TYPES
@@ -159,7 +161,7 @@ class TestEventTypeRegistry:
 
     def test_registry_has_no_duplicates(self):
         """frozenset guarantees uniqueness; source list was also duplicate-free."""
-        assert len(_EVENT_TYPES) == 28
+        assert len(_EVENT_TYPES) == 30
 
     def test_registry_immutable_no_add_method(self):
         with pytest.raises(AttributeError):
