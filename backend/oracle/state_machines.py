@@ -18,13 +18,15 @@ Slate machine — 10 states (§10.3, DCR-W4-002):
 
     Terminal: settled | analysis_failed | activation_failed
 
-Game machine — 9 states (§10.4, DCR-W4-003):
+Game machine — 10 states (§10.4, DCR-W4-003; Inc-1 D-3):
     scheduled | preliminary_analysis | lineup_monitoring | final_analysis |
-    activation_eligible | pregame_locked | settled | voided | postponed
+    activation_eligible | pregame_locked | settled | voided | postponed |
+    data_gather_failed
 
     analysis_failed is NOT a game state (deliberate asymmetry per §10.4).
+    data_gather_failed IS a game state (Inc-1 D-3; terminal).
 
-    Terminal: settled | voided | postponed
+    Terminal: settled | voided | postponed | data_gather_failed
 """
 
 from __future__ import annotations
@@ -122,16 +124,19 @@ _GAME_STATES: frozenset[str] = frozenset({
     "settled",
     "voided",
     "postponed",
+    "data_gather_failed",
 })
 
 _GAME_TERMINAL_STATES: frozenset[str] = frozenset({
     "settled",
     "voided",
     "postponed",
+    "data_gather_failed",
 })
 
 _GAME_TRANSITIONS: frozenset[tuple[str, str]] = frozenset({
     ("scheduled",             "preliminary_analysis"),
+    ("scheduled",             "data_gather_failed"),
     ("preliminary_analysis",  "lineup_monitoring"),
     ("lineup_monitoring",     "final_analysis"),
     ("final_analysis",        "activation_eligible"),

@@ -35,6 +35,8 @@ ORACLE_TABLES = [
     "oracle_plays",
     "oracle_play_events",
     "oracle_immutability_audit",
+    "oracle_preliminary_data",
+    "oracle_lifecycle_audit",
 ]
 
 PLATFORM_TABLES = [

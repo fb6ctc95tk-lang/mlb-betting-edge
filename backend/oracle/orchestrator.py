@@ -17,6 +17,7 @@ CONNECTION AND TRANSACTION MODEL (DCR-W5-001 §6-8, DCR-W4-005):
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import date, datetime, timezone
 
@@ -31,6 +32,8 @@ from backend.oracle.identifier_manager import (
     generate_slate_run_id,
 )
 from backend.oracle.kill_switch import is_autonomous_run_enabled
+from backend.oracle.mlb_adapter import MLBAdapter
+from backend.oracle.stage3_data_gather import gather_preliminary_data
 from backend.oracle.state_machines import (
     transition_game_state,
     transition_slate_state,
@@ -80,6 +83,53 @@ def _update_game_status(conn: object, game_run_id: str, new_status: str) -> None
         cur.execute(
             "UPDATE oracle_game_analyses SET game_status = %s WHERE game_run_id = %s",
             (new_status, game_run_id),
+        )
+    finally:
+        cur.close()
+
+
+def _insert_preliminary_data(
+    conn: object,
+    game_run_id: str,
+    slate_run_id: str,
+    data_version_id: str,
+    game_id: str,
+    gathered_at: object,
+    raw_payload: str,
+) -> None:
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            INSERT INTO oracle_preliminary_data
+                (game_run_id, slate_run_id, data_version_id, game_id,
+                 gathered_at, raw_payload)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            """,
+            (game_run_id, slate_run_id, data_version_id, game_id,
+             gathered_at, raw_payload),
+        )
+    finally:
+        cur.close()
+
+
+def _insert_lifecycle_audit(
+    conn: object,
+    game_run_id: str,
+    slate_run_id: str,
+    stage: str,
+    event: str,
+    detail: str | None = None,
+) -> None:
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            INSERT INTO oracle_lifecycle_audit
+                (game_run_id, slate_run_id, stage, event, detail)
+            VALUES (%s, %s, %s, %s, %s)
+            """,
+            (game_run_id, slate_run_id, stage, event, detail),
         )
     finally:
         cur.close()
@@ -237,7 +287,7 @@ def run_stage_2(
 
 
 # ---------------------------------------------------------------------------
-# Stage 3 — Preliminary Data Gather stub
+# Stage 3 — Preliminary Data Gather (Inc-1 implementation)
 # ---------------------------------------------------------------------------
 
 def run_stage_3(
@@ -246,18 +296,101 @@ def run_stage_3(
     game_run_ids: list[str],
     env: dict | None = None,
 ) -> None:
-    """Stage 3 stub — Preliminary Data Gather (providers deferred to Phase 2).
+    """Stage 3 — Preliminary Data Gather (Inc-1; authorized by PM-785/Authorities A+B).
 
-    game_analysis_started was already written by Stage 2; not repeated here
-    (per P1-WP4-T07: 'writes game_analysis_started per game if not already
-    written'). Transitions each game: scheduled → preliminary_analysis.
+    MI-5 gate: adapter.get_availability() is called before the per-game loop.
+    If unavailable, all games are batched to data_gather_failed, committed, and
+    the function returns early (PM-783/Authority B §4.2).
+
+    Success path (available=True):
+      INSERT oracle_preliminary_data, INSERT oracle_lifecycle_audit,
+      transition scheduled → preliminary_analysis,
+      UPDATE oracle_game_analyses, record preliminary_data_gathered event.
+
+    Failure path (available=False after all retries):
+      INSERT oracle_lifecycle_audit, transition scheduled → data_gather_failed,
+      UPDATE oracle_game_analyses, record data_gather_failed event.
+
+    Caller owns the transaction (DCR-W5-001); conn.commit() called once at end.
     """
     _check_kill_switch(env=env)
-    logger.info("Stage 3 stub: preliminary data gather deferred to Phase 2")
+
+    adapter = MLBAdapter()
+    now = _now_utc()
+
+    availability = adapter.get_availability()
+    if not availability.available:
+        for game_run_id in game_run_ids:
+            game_id = game_run_id.rsplit("-", 1)[-1]
+            _insert_lifecycle_audit(
+                conn,
+                game_run_id=game_run_id,
+                slate_run_id=slate_run_id,
+                stage="3",
+                event="data_gather_failed",
+                detail=str(availability.reason) if availability.reason is not None else None,
+            )
+            transition_game_state("scheduled", "data_gather_failed")
+            _update_game_status(conn, game_run_id, "data_gather_failed")
+            record_event(
+                conn, "data_gather_failed", slate_run_id, now,
+                game_run_id=game_run_id,
+            )
+        conn.commit()
+        return
 
     for game_run_id in game_run_ids:
-        transition_game_state("scheduled", "preliminary_analysis")
-        _update_game_status(conn, game_run_id, "preliminary_analysis")
+        game_id = game_run_id.rsplit("-", 1)[-1]
+        response = gather_preliminary_data(game_id, adapter)
+
+        if response.availability.available and response.record is not None:
+            record = response.record
+            _insert_preliminary_data(
+                conn,
+                game_run_id=game_run_id,
+                slate_run_id=slate_run_id,
+                data_version_id=record.data_version_id,
+                game_id=game_id,
+                gathered_at=record.gathered_at,
+                raw_payload=json.dumps(record.raw_payload),
+            )
+            _insert_lifecycle_audit(
+                conn,
+                game_run_id=game_run_id,
+                slate_run_id=slate_run_id,
+                stage="3",
+                event="preliminary_data_gathered",
+            )
+            transition_game_state("scheduled", "preliminary_analysis")
+            _update_game_status(conn, game_run_id, "preliminary_analysis")
+            record_event(
+                conn, "preliminary_data_gathered", slate_run_id, now,
+                game_run_id=game_run_id,
+            )
+            logger.info(
+                "Stage 3: game_run_id=%s data_version_id=%s",
+                game_run_id, record.data_version_id,
+            )
+        else:
+            reason = response.availability.reason
+            _insert_lifecycle_audit(
+                conn,
+                game_run_id=game_run_id,
+                slate_run_id=slate_run_id,
+                stage="3",
+                event="data_gather_failed",
+                detail=str(reason) if reason is not None else None,
+            )
+            transition_game_state("scheduled", "data_gather_failed")
+            _update_game_status(conn, game_run_id, "data_gather_failed")
+            record_event(
+                conn, "data_gather_failed", slate_run_id, now,
+                game_run_id=game_run_id,
+            )
+            logger.warning(
+                "Stage 3: data gather failed for game_run_id=%s reason=%s",
+                game_run_id, reason,
+            )
 
     conn.commit()
 

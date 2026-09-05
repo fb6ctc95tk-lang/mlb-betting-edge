@@ -146,12 +146,14 @@ _APPROVED_EVENT_TYPES: frozenset[str] = frozenset({
     "le_milestone_detected",
     "le_report_stored",
     "immutability_violation_rejected",
+    "preliminary_data_gathered",
+    "data_gather_failed",
 })
 
 
 class TestEventTypeRegistry:
-    def test_registry_contains_exactly_30_types(self):
-        assert len(_EVENT_TYPES) == 30
+    def test_registry_contains_exactly_32_types(self):
+        assert len(_EVENT_TYPES) == 32
 
     def test_registry_matches_approved_enumeration(self):
         assert _EVENT_TYPES == _APPROVED_EVENT_TYPES
@@ -161,7 +163,7 @@ class TestEventTypeRegistry:
 
     def test_registry_has_no_duplicates(self):
         """frozenset guarantees uniqueness; source list was also duplicate-free."""
-        assert len(_EVENT_TYPES) == 30
+        assert len(_EVENT_TYPES) == 32
 
     def test_registry_immutable_no_add_method(self):
         with pytest.raises(AttributeError):
@@ -183,7 +185,7 @@ class TestEventTypeRegistry:
 class TestEventTypeValidation:
     @pytest.mark.parametrize("event_type", sorted(_APPROVED_EVENT_TYPES))
     def test_every_approved_type_accepted(self, event_type):
-        """No ValueError raised for any of the 28 approved event types."""
+        """No ValueError raised for any of the 32 approved event types."""
         conn = _TrackingConn()
         result = record_event(conn, event_type, _VALID_SLATE_RUN_ID, _VALID_TIMESTAMP)
         assert result == 42

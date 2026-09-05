@@ -1,9 +1,10 @@
 """Oracle — Sport Module Adapter interface contract (D-1 DESIGN ACCEPTED).
 
 Defines the behavioral obligations the Oracle Core imposes on every Sport
-Module adapter: MI-5 (availability), MI-1 (game-start timestamp), and the
-Stage 6 observation call.  Data structures and abstract base class only;
-no technology, protocol, or encoding is chosen (D-1 v1.1; PM-443).
+Module adapter: MI-5 (availability), MI-1 (game-start timestamp), MI-6
+(preliminary data gather), and the Stage 6 observation call.  Data
+structures and abstract base class only; no technology, protocol, or
+encoding is chosen (D-1 v1.1; PM-443; Inc-1 D-1 extension).
 
 Call direction (SI-3): Core initiates every call; adapters return values.
 Engine-layer purity (CO-5, SI-4): CandidateChangeEvent.classification_fields
@@ -154,15 +155,48 @@ class ObservationResponse:
 
 
 # ---------------------------------------------------------------------------
-# Abstract adapter base class (D-1 §§3, 5, 6, 9)
+# MI-6 — Preliminary data gather (Inc-1 D-1 extension)
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class PreliminaryDataRecord:
+    """Preliminary game data returned by MI-6 when available (Inc-1 D-1 §7.3).
+
+    data_version_id uniquely identifies this snapshot and is used by the
+    Orchestrator to populate oracle_preliminary_data.data_version_id.
+    raw_payload carries the sport-module-opaque payload; Core stores it
+    without interpretation (CO-5).
+    """
+
+    game_id: str
+    data_version_id: str
+    gathered_at: datetime
+    source_system: str
+    raw_payload: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class PreliminaryDataResponse:
+    """MI-6 return value (Inc-1 D-1 §7.2).
+
+    available=True: record is present and data is valid.
+    available=False: adapter cannot provide data; record must be None.
+    """
+
+    record: PreliminaryDataRecord | None
+    availability: AvailabilityStatus
+
+
+# ---------------------------------------------------------------------------
+# Abstract adapter base class (D-1 §§3, 5, 6, 7, 9)
 # ---------------------------------------------------------------------------
 
 class SportModuleAdapter(ABC):
     """Abstract base class for Oracle Sport Module adapters (D-1 §9).
 
-    A concrete subclass (e.g. MLBSportModuleAdapter) implements these three
-    methods for a specific sport.  Core depends only on this interface;
-    adapter internals are not visible to Core (SI-2).
+    A concrete subclass (e.g. MLBAdapter) implements these four methods for
+    a specific sport.  Core depends only on this interface; adapter internals
+    are not visible to Core (SI-2).
 
     All calls are Core-initiated (SI-3).  Concrete adapters must never:
       - Initiate contact with Core
@@ -188,6 +222,15 @@ class SportModuleAdapter(ABC):
         Called by Core during Stage 2 game activation.  If the timestamp
         cannot be provided the adapter must return available=False; a missing
         value must not be returned as a silent null (D-1 §3.5).
+        """
+
+    @abstractmethod
+    def get_preliminary_data(self, game_id: str) -> PreliminaryDataResponse:
+        """MI-6: return preliminary game data for the identified game (Inc-1 D-1 §7).
+
+        Called by Core during Stage 3 preliminary data gather.  If data
+        cannot be provided the adapter must return available=False with
+        record=None; silent failure is prohibited (D-1 §6.4 by analogy).
         """
 
     @abstractmethod

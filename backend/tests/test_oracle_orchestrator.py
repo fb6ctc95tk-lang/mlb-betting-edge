@@ -58,6 +58,12 @@ from backend.oracle.state_machines import (
     transition_game_state,
     transition_slate_state,
 )
+from backend.oracle.adapter_interface import (
+    AvailabilityStatus,
+    PreliminaryDataRecord,
+    PreliminaryDataResponse,
+    UnavailabilityReason,
+)
 from backend.oracle.orchestrator import (
     KillSwitchHaltError,
     OrchestratorError,
@@ -312,10 +318,13 @@ class TestSlateStateMachineInvalidTransitions:
 # ---------------------------------------------------------------------------
 
 class TestGameStateMachineValidTransitions:
-    """T03 — All 8 allowlist transitions must return to_state (DCR-W4-003)."""
+    """T03 — All 9 allowlist transitions must return to_state (DCR-W4-003; Inc-1 D-3)."""
 
     def test_scheduled_to_preliminary_analysis(self):
         assert transition_game_state("scheduled", "preliminary_analysis") == "preliminary_analysis"
+
+    def test_scheduled_to_data_gather_failed(self):
+        assert transition_game_state("scheduled", "data_gather_failed") == "data_gather_failed"
 
     def test_preliminary_analysis_to_lineup_monitoring(self):
         assert transition_game_state("preliminary_analysis", "lineup_monitoring") == "lineup_monitoring"
@@ -363,6 +372,10 @@ class TestGameStateMachineTerminalEnforcement:
         with pytest.raises(InvalidStateTransitionError):
             transition_game_state("postponed", "scheduled")
 
+    def test_data_gather_failed_is_terminal(self):
+        with pytest.raises(InvalidStateTransitionError):
+            transition_game_state("data_gather_failed", "preliminary_analysis")
+
     def test_settled_to_preliminary_analysis_raises(self):
         with pytest.raises(InvalidStateTransitionError):
             transition_game_state("settled", "preliminary_analysis")
@@ -375,9 +388,17 @@ class TestGameStateMachineTerminalEnforcement:
         with pytest.raises(InvalidStateTransitionError):
             transition_game_state("postponed", "final_analysis")
 
+    def test_data_gather_failed_to_scheduled_raises(self):
+        with pytest.raises(InvalidStateTransitionError):
+            transition_game_state("data_gather_failed", "scheduled")
+
     def test_error_message_identifies_terminal_state(self):
         with pytest.raises(InvalidStateTransitionError, match="terminal"):
             transition_game_state("settled", "scheduled")
+
+    def test_error_message_identifies_data_gather_failed_as_terminal(self):
+        with pytest.raises(InvalidStateTransitionError, match="terminal"):
+            transition_game_state("data_gather_failed", "scheduled")
 
 
 # ---------------------------------------------------------------------------
@@ -437,6 +458,11 @@ class TestGameStateMachineInvalidTransitions:
         """DCR-W4-003: analysis_failed cannot appear as a game source state."""
         with pytest.raises(InvalidStateTransitionError):
             transition_game_state("analysis_failed", "settled")
+
+    def test_data_gather_failed_outbound_raises_because_terminal(self):
+        """Inc-1 D-3: data_gather_failed is a game terminal state; no outbound transitions."""
+        with pytest.raises(InvalidStateTransitionError):
+            transition_game_state("data_gather_failed", "preliminary_analysis")
 
     def test_error_is_invalid_state_transition_error_type(self):
         with pytest.raises(InvalidStateTransitionError):
@@ -887,6 +913,8 @@ _PATCH_GET_GAME_PK = "backend.oracle.orchestrator.get_game_pk"
 _PATCH_VALIDATE_FIXTURE = "backend.oracle.orchestrator.validate_fixture_record"
 _PATCH_TRANSITION_SLATE = "backend.oracle.orchestrator.transition_slate_state"
 _PATCH_TRANSITION_GAME = "backend.oracle.orchestrator.transition_game_state"
+_PATCH_MLB_ADAPTER = "backend.oracle.orchestrator.MLBAdapter"
+_PATCH_GATHER_PRELIMINARY_DATA = "backend.oracle.orchestrator.gather_preliminary_data"
 
 _FIXTURE_RECORDS = [
     {
@@ -904,6 +932,17 @@ _FIXTURE_RECORDS = [
         "venue": "Dodger Stadium",
     },
 ]
+
+_GATHER_AVAILABLE_RESPONSE = PreliminaryDataResponse(
+    record=PreliminaryDataRecord(
+        game_id="test",
+        data_version_id="DV-test-0",
+        gathered_at=datetime(2026, 7, 25, 12, 0, tzinfo=timezone.utc),
+        source_system="mlb-statsapi",
+        raw_payload={},
+    ),
+    availability=AvailabilityStatus(available=True),
+)
 
 
 class _MockCursor:
@@ -1277,12 +1316,13 @@ class TestStage2ScheduleRetrieval:
 # ---------------------------------------------------------------------------
 
 class TestStage3PreliminaryDataGather:
-    """Q — Stage 3 stub: no events; game state scheduled→preliminary_analysis."""
+    """Q — Stage 3 Inc-1: preliminary data gather; game state scheduled→preliminary_analysis."""
 
     def _run(self, conn=None, env=_ENABLED_ENV):
         if conn is None:
             conn = _StageConn()
-        with patch(_PATCH_RECORD_EVENT, return_value=1) as mock_re:
+        with patch(_PATCH_GATHER_PRELIMINARY_DATA, return_value=_GATHER_AVAILABLE_RESPONSE), \
+             patch(_PATCH_RECORD_EVENT, return_value=1) as mock_re:
             result = run_stage_3(conn, _TEST_SLATE_ID, _TEST_GAME_IDS, env=env)
         return result, conn, mock_re
 
@@ -1290,9 +1330,11 @@ class TestStage3PreliminaryDataGather:
         result, _, _ = self._run()
         assert result is None
 
-    def test_writes_no_events(self):
+    def test_writes_preliminary_data_gathered_per_game(self):
         _, _, mock_re = self._run()
-        mock_re.assert_not_called()
+        assert mock_re.call_count == 2
+        event_types = [c[0][1] for c in mock_re.call_args_list]
+        assert all(et == "preliminary_data_gathered" for et in event_types)
 
     def test_updates_game_status_to_preliminary_analysis_per_game(self):
         _, conn, _ = self._run()
@@ -1301,6 +1343,26 @@ class TestStage3PreliminaryDataGather:
         for c in update_cursors:
             assert "preliminary_analysis" in c.params_log[0]
 
+    def test_inserts_into_oracle_preliminary_data_per_game(self):
+        _, conn, _ = self._run()
+        insert_sqls = [s for c in conn.cursors for s in c.sql_log
+                       if "oracle_preliminary_data" in s.lower() and "INSERT" in s.upper()]
+        assert len(insert_sqls) == 2
+
+    def test_inserts_into_oracle_lifecycle_audit_per_game(self):
+        _, conn, _ = self._run()
+        insert_sqls = [s for c in conn.cursors for s in c.sql_log
+                       if "oracle_lifecycle_audit" in s.lower() and "INSERT" in s.upper()]
+        assert len(insert_sqls) == 2
+
+    def test_preliminary_data_insert_includes_game_run_id(self):
+        _, conn, _ = self._run()
+        prelim_cursors = [c for c in conn.cursors
+                          if any("oracle_preliminary_data" in s.lower() and "INSERT" in s.upper()
+                                 for s in c.sql_log)]
+        game_run_ids_in_params = [c.params_log[0][0] for c in prelim_cursors]
+        assert set(game_run_ids_in_params) == set(_TEST_GAME_IDS)
+
     def test_commits_exactly_once(self):
         _, conn, _ = self._run()
         assert conn.commit_count == 1
@@ -1308,6 +1370,35 @@ class TestStage3PreliminaryDataGather:
     def test_does_not_rollback(self):
         _, conn, _ = self._run()
         assert not conn.rollback_called
+
+
+class TestStage3MI5AvailabilityGate:
+    """Q — MI-5 gate: run_stage_3 early-exits when adapter unavailable (PM-783/Authority B)."""
+
+    def _run_unavailable(self, reason=UnavailabilityReason.DATA_SOURCE_UNREACHABLE):
+        conn = _StageConn()
+        mock_adapter = MagicMock()
+        mock_adapter.get_availability.return_value = AvailabilityStatus(
+            available=False, reason=reason
+        )
+        with patch(_PATCH_MLB_ADAPTER, return_value=mock_adapter), \
+             patch(_PATCH_RECORD_EVENT, return_value=1) as mock_re:
+            result = run_stage_3(conn, _TEST_SLATE_ID, _TEST_GAME_IDS, env=_ENABLED_ENV)
+        return result, conn, mock_re
+
+    def test_mi5_unavailable_returns_none(self):
+        result, _, _ = self._run_unavailable()
+        assert result is None
+
+    def test_mi5_unavailable_commits_exactly_once(self):
+        _, conn, _ = self._run_unavailable()
+        assert conn.commit_count == 1
+
+    def test_mi5_unavailable_writes_data_gather_failed_per_game(self):
+        _, _, mock_re = self._run_unavailable()
+        assert mock_re.call_count == 2
+        event_types = [c[0][1] for c in mock_re.call_args_list]
+        assert all(et == "data_gather_failed" for et in event_types)
 
 
 # ---------------------------------------------------------------------------
@@ -1586,11 +1677,14 @@ class TestEventOrderingAndCorrectness:
             run_stage_2(conn, _TEST_SLATE_ID, env=_ENABLED_ENV)
         assert mock_re.call_args_list[0][0][1] == "schedule_retrieved"
 
-    def test_stage3_writes_no_events(self):
+    def test_stage3_writes_preliminary_data_gathered_per_game(self):
         conn = _StageConn()
-        with patch(_PATCH_RECORD_EVENT, return_value=1) as mock_re:
+        with patch(_PATCH_GATHER_PRELIMINARY_DATA, return_value=_GATHER_AVAILABLE_RESPONSE), \
+             patch(_PATCH_RECORD_EVENT, return_value=1) as mock_re:
             run_stage_3(conn, _TEST_SLATE_ID, _TEST_GAME_IDS, env=_ENABLED_ENV)
-        mock_re.assert_not_called()
+        assert mock_re.call_count == 2
+        event_types = [c[0][1] for c in mock_re.call_args_list]
+        assert all(et == "preliminary_data_gathered" for et in event_types)
 
     def test_stage4_writes_exactly_two_events(self):
         conn = _StageConn()
@@ -1656,7 +1750,8 @@ class TestTransactionOwnership:
 
     def test_stage3_commits_separately_from_stage4(self):
         conn = _StageConn()
-        with patch(_PATCH_RECORD_EVENT, return_value=1):
+        with patch(_PATCH_GATHER_PRELIMINARY_DATA, return_value=_GATHER_AVAILABLE_RESPONSE), \
+             patch(_PATCH_RECORD_EVENT, return_value=1):
             run_stage_3(conn, _TEST_SLATE_ID, _TEST_GAME_IDS, env=_ENABLED_ENV)
         commit_after_stage3 = conn.commit_count
         with patch(_PATCH_RECORD_EVENT, return_value=1):
@@ -1769,6 +1864,8 @@ class TestIntegrationFullPhase1Run:
         cur = conn.cursor()
         try:
             cur.execute("TRUNCATE oracle_play_events")
+            cur.execute("TRUNCATE oracle_preliminary_data")
+            cur.execute("TRUNCATE oracle_lifecycle_audit")
             cur.execute("DELETE FROM oracle_game_analyses WHERE slate_run_id LIKE 'ORACLE-20260725-%'")
             cur.execute("DELETE FROM oracle_slate_runs WHERE slate_run_id LIKE 'ORACLE-20260725-%'")
         finally:
