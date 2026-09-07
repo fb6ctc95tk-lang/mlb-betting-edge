@@ -55,7 +55,7 @@ jobs:
           echo "a71d7b6aa8b75db83638ded5b2f2431cd81fde969f2a42dda11a22d8f7dd0cf4  backend/oracle/adapter_interface.py" | sha256sum --check
           echo "86ada9410b282d8760c8581f29b87cc5a77ad6a6a491a3be6301ed65e686656b  backend/oracle/sport_policy_store.py" | sha256sum --check
           echo "8a3c4f9177b070a2b2ba9ce9960536232dcddc6ffd2645e1fc8b8fc184bd76cd  backend/oracle/consumer_admin_interface.py" | sha256sum --check
-          echo "509442ea8e05836b6407e73c237fab24cf0be7bbdfbd0587bde30f0ff646111c  backend/oracle/event_store.py" | sha256sum --check
+          echo "86f8e99d484ea288017414c90a3ec7c081d724c28c7e77329e72ef4e4af6d726  backend/oracle/event_store.py" | sha256sum --check
 
       - name: Apply database schema and migrations
         run: |
