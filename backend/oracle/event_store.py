@@ -16,7 +16,7 @@ from backend.oracle.identifier_manager import (
 
 
 # ---------------------------------------------------------------------------
-# Event type registry — 32 approved types (DCR-W5-001 §15; Inc-1 D-3 adds
+# Event type registry — 33 approved types (DCR-W5-001 §15; Inc-1 D-3 adds
 # preliminary_data_gathered and data_gather_failed; enumeration is
 # authoritative despite planning text labelling the list as "27")
 # ---------------------------------------------------------------------------
@@ -54,6 +54,7 @@ _EVENT_TYPES: frozenset[str] = frozenset({
     "immutability_violation_rejected",
     "preliminary_data_gathered",
     "data_gather_failed",
+    "preliminary_analysis_failed",
 })
 
 

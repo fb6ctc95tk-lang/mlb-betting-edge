@@ -915,6 +915,14 @@ _PATCH_TRANSITION_SLATE = "backend.oracle.orchestrator.transition_slate_state"
 _PATCH_TRANSITION_GAME = "backend.oracle.orchestrator.transition_game_state"
 _PATCH_MLB_ADAPTER = "backend.oracle.orchestrator.MLBAdapter"
 _PATCH_GATHER_PRELIMINARY_DATA = "backend.oracle.orchestrator.gather_preliminary_data"
+_PATCH_FETCH_PRELIMINARY_RECORD = "backend.oracle.orchestrator._fetch_preliminary_record"
+_PATCH_INSERT_ECF_RESULT = "backend.oracle.orchestrator._insert_ecf_result"
+
+_TEST_PRELIMINARY_ROW = (
+    {},
+    "DV-test-0",
+    datetime(2026, 7, 25, 12, 0, tzinfo=timezone.utc),
+)
 
 _FIXTURE_RECORDS = [
     {
@@ -1406,12 +1414,15 @@ class TestStage3MI5AvailabilityGate:
 # ---------------------------------------------------------------------------
 
 class TestStage4EcfCalculation:
-    """R — Stage 4 stub: ecf_calculated per game; no state transition."""
+    """R — Stage 4: ecf_calculated per game (success path); no game state update."""
 
     def _run(self, conn=None, env=_ENABLED_ENV):
         if conn is None:
             conn = _StageConn()
-        with patch(_PATCH_RECORD_EVENT, return_value=1) as mock_re:
+        with patch(_PATCH_FETCH_PRELIMINARY_RECORD, return_value=_TEST_PRELIMINARY_ROW), \
+             patch(_PATCH_INSERT_ECF_RESULT), \
+             patch("backend.oracle.orchestrator._insert_lifecycle_audit"), \
+             patch(_PATCH_RECORD_EVENT, return_value=1) as mock_re:
             run_stage_4(conn, _TEST_SLATE_ID, _TEST_GAME_IDS, env=env)
         return conn, mock_re
 
@@ -1688,7 +1699,10 @@ class TestEventOrderingAndCorrectness:
 
     def test_stage4_writes_exactly_two_events(self):
         conn = _StageConn()
-        with patch(_PATCH_RECORD_EVENT, return_value=1) as mock_re:
+        with patch(_PATCH_FETCH_PRELIMINARY_RECORD, return_value=_TEST_PRELIMINARY_ROW), \
+             patch(_PATCH_INSERT_ECF_RESULT), \
+             patch("backend.oracle.orchestrator._insert_lifecycle_audit"), \
+             patch(_PATCH_RECORD_EVENT, return_value=1) as mock_re:
             run_stage_4(conn, _TEST_SLATE_ID, _TEST_GAME_IDS, env=_ENABLED_ENV)
         assert mock_re.call_count == 2
 
@@ -2016,3 +2030,103 @@ class TestIntegrationFullPhase1Run:
         finally:
             cur.close()
         assert val == 0
+
+
+# ===========================================================================
+# W. Stage 4 — Inc-2 augmentation tests (PM-867)
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# W1. preliminary_analysis_failed state machine (Inc-2 Stage 4)
+# ---------------------------------------------------------------------------
+
+class TestGameStateMachinePreliminaryAnalysisFailedState:
+    """W1 — preliminary_analysis_failed is a valid terminal game state (Inc-2 Stage 4)."""
+
+    def test_preliminary_analysis_to_preliminary_analysis_failed_is_valid(self):
+        result = transition_game_state("preliminary_analysis", "preliminary_analysis_failed")
+        assert result == "preliminary_analysis_failed"
+
+    def test_preliminary_analysis_failed_is_terminal(self):
+        with pytest.raises(InvalidStateTransitionError):
+            transition_game_state("preliminary_analysis_failed", "lineup_monitoring")
+
+    def test_preliminary_analysis_failed_cannot_go_to_settled(self):
+        with pytest.raises(InvalidStateTransitionError):
+            transition_game_state("preliminary_analysis_failed", "settled")
+
+    def test_preliminary_analysis_failed_cannot_go_to_scheduled(self):
+        with pytest.raises(InvalidStateTransitionError):
+            transition_game_state("preliminary_analysis_failed", "scheduled")
+
+    def test_scheduled_cannot_go_to_preliminary_analysis_failed(self):
+        with pytest.raises(InvalidStateTransitionError):
+            transition_game_state("scheduled", "preliminary_analysis_failed")
+
+    def test_lineup_monitoring_cannot_go_to_preliminary_analysis_failed(self):
+        with pytest.raises(InvalidStateTransitionError):
+            transition_game_state("lineup_monitoring", "preliminary_analysis_failed")
+
+    def test_error_message_identifies_terminal_state(self):
+        with pytest.raises(InvalidStateTransitionError, match="terminal"):
+            transition_game_state("preliminary_analysis_failed", "scheduled")
+
+    def test_preliminary_analysis_still_reaches_lineup_monitoring(self):
+        """Inc-2 addition must not break existing preliminary_analysis → lineup_monitoring."""
+        result = transition_game_state("preliminary_analysis", "lineup_monitoring")
+        assert result == "lineup_monitoring"
+
+
+# ---------------------------------------------------------------------------
+# W2. preliminary_analysis_failed event type registry
+# ---------------------------------------------------------------------------
+
+class TestPreliminaryAnalysisFailedEventType:
+    """W2 — preliminary_analysis_failed is an approved event type (P-4b; PM-859)."""
+
+    def test_preliminary_analysis_failed_is_accepted_by_record_event(self):
+        from backend.oracle.event_store import _EVENT_TYPES
+        assert "preliminary_analysis_failed" in _EVENT_TYPES
+
+    def test_event_type_count_is_33(self):
+        from backend.oracle.event_store import _EVENT_TYPES
+        assert len(_EVENT_TYPES) == 33
+
+    def test_ecf_calculated_still_present(self):
+        from backend.oracle.event_store import _EVENT_TYPES
+        assert "ecf_calculated" in _EVENT_TYPES
+
+    def test_data_gather_failed_still_present(self):
+        from backend.oracle.event_store import _EVENT_TYPES
+        assert "data_gather_failed" in _EVENT_TYPES
+
+    def test_preliminary_data_gathered_still_present(self):
+        from backend.oracle.event_store import _EVENT_TYPES
+        assert "preliminary_data_gathered" in _EVENT_TYPES
+
+
+# ---------------------------------------------------------------------------
+# W3. Stage 4 — failure path integration with state machine
+# ---------------------------------------------------------------------------
+
+class TestStage4FailurePathStateMachine:
+    """W3 — Stage 4 failure path uses valid state machine transition."""
+
+    def test_preliminary_analysis_to_failed_transition_is_valid_for_failure_path(self):
+        """The failure path calls transition_game_state with this pair; it must not raise."""
+        result = transition_game_state("preliminary_analysis", "preliminary_analysis_failed")
+        assert result == "preliminary_analysis_failed"
+
+
+# ---------------------------------------------------------------------------
+# W4. Stage 4 — kill switch precedes DB fetch
+# ---------------------------------------------------------------------------
+
+class TestStage4KillSwitchPrecedesFetch:
+    """W4 — Stage 4 kill switch check precedes _fetch_preliminary_record."""
+
+    def test_stage4_kill_switch_raises_before_fetch(self):
+        with patch(_PATCH_FETCH_PRELIMINARY_RECORD) as mock_fetch:
+            with pytest.raises(KillSwitchHaltError):
+                run_stage_4(_StageConn(), _TEST_SLATE_ID, _TEST_GAME_IDS, env=_DISABLED_ENV)
+        mock_fetch.assert_not_called()

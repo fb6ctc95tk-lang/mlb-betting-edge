@@ -18,15 +18,17 @@ Slate machine — 10 states (§10.3, DCR-W4-002):
 
     Terminal: settled | analysis_failed | activation_failed
 
-Game machine — 10 states (§10.4, DCR-W4-003; Inc-1 D-3):
+Game machine — 11 states (§10.4, DCR-W4-003; Inc-1 D-3; Inc-2 Stage 4):
     scheduled | preliminary_analysis | lineup_monitoring | final_analysis |
     activation_eligible | pregame_locked | settled | voided | postponed |
-    data_gather_failed
+    data_gather_failed | preliminary_analysis_failed
 
     analysis_failed is NOT a game state (deliberate asymmetry per §10.4).
     data_gather_failed IS a game state (Inc-1 D-3; terminal).
+    preliminary_analysis_failed IS a game state (Inc-2 Stage 4; terminal).
 
-    Terminal: settled | voided | postponed | data_gather_failed
+    Terminal: settled | voided | postponed | data_gather_failed |
+              preliminary_analysis_failed
 """
 
 from __future__ import annotations
@@ -111,7 +113,7 @@ def transition_slate_state(from_state: str, to_state: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Game-level state machine (9 states)
+# Game-level state machine (11 states)
 # ---------------------------------------------------------------------------
 
 _GAME_STATES: frozenset[str] = frozenset({
@@ -125,6 +127,7 @@ _GAME_STATES: frozenset[str] = frozenset({
     "voided",
     "postponed",
     "data_gather_failed",
+    "preliminary_analysis_failed",
 })
 
 _GAME_TERMINAL_STATES: frozenset[str] = frozenset({
@@ -132,12 +135,14 @@ _GAME_TERMINAL_STATES: frozenset[str] = frozenset({
     "voided",
     "postponed",
     "data_gather_failed",
+    "preliminary_analysis_failed",
 })
 
 _GAME_TRANSITIONS: frozenset[tuple[str, str]] = frozenset({
     ("scheduled",             "preliminary_analysis"),
     ("scheduled",             "data_gather_failed"),
     ("preliminary_analysis",  "lineup_monitoring"),
+    ("preliminary_analysis",  "preliminary_analysis_failed"),
     ("lineup_monitoring",     "final_analysis"),
     ("final_analysis",        "activation_eligible"),
     ("activation_eligible",   "pregame_locked"),

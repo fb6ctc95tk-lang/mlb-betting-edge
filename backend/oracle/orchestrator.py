@@ -1,8 +1,9 @@
 """Oracle Phase 1 — Run Orchestrator (WP-4 T05–T08).
 
 Coordinates the Phase 1 Oracle slate run lifecycle across Stages 1–10.
-Stages 3–10 are Phase 1 stubs that write approved event types and transition
-state machines; they do not call providers, engines, or LLMs.
+Stage 3 and Stages 5–10 are Phase 1 stubs that write approved event types and
+transition state machines; they do not call providers, engines, or LLMs.
+Stage 4 is a full Inc-2 implementation (Structural ECF v1; authorized PM-867).
 
 CONNECTION AND TRANSACTION MODEL (DCR-W5-001 §6-8, DCR-W4-005):
   - The Orchestrator opens psycopg2 connections with autocommit=False.
@@ -22,6 +23,7 @@ import logging
 from datetime import date, datetime, timezone
 
 from backend.oracle.event_store import record_event
+from backend.oracle.stage4_ecf import compute_ecf
 from backend.oracle.fixtures import (
     get_game_pk,
     load_phase1_fixtures,
@@ -130,6 +132,54 @@ def _insert_lifecycle_audit(
             VALUES (%s, %s, %s, %s, %s)
             """,
             (game_run_id, slate_run_id, stage, event, detail),
+        )
+    finally:
+        cur.close()
+
+
+def _fetch_preliminary_record(
+    conn: object,
+    game_run_id: str,
+) -> tuple[object, str, object] | None:
+    """Return (raw_payload, data_version_id, gathered_at) for game_run_id, or None."""
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT raw_payload, data_version_id, gathered_at
+            FROM oracle_preliminary_data
+            WHERE game_run_id = %s
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            (game_run_id,),
+        )
+        return cur.fetchone()
+    finally:
+        cur.close()
+
+
+def _insert_ecf_result(
+    conn: object,
+    ecf_result_id: str,
+    game_run_id: str,
+    data_version_id: str,
+    ecf_score: float,
+    component_scores: dict,
+    model_version: str,
+    computed_at: object,
+) -> None:
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            INSERT INTO oracle_ecf_results
+                (ecf_result_id, game_run_id, data_version_id, ecf_score,
+                 component_scores, model_version, computed_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            """,
+            (ecf_result_id, game_run_id, data_version_id, ecf_score,
+             json.dumps(component_scores), model_version, computed_at),
         )
     finally:
         cur.close()
@@ -396,7 +446,7 @@ def run_stage_3(
 
 
 # ---------------------------------------------------------------------------
-# Stage 4 — ECF Calculation stub
+# Stage 4 — ECF Calculation (Structural ECF v1; authorized PM-867)
 # ---------------------------------------------------------------------------
 
 def run_stage_4(
@@ -405,18 +455,88 @@ def run_stage_4(
     game_run_ids: list[str],
     env: dict | None = None,
 ) -> None:
-    """Stage 4 stub — ECF Calculation (ECF engine deferred to Phase 3).
+    """Stage 4 — ECF Calculation (Structural ECF v1; authorized PM-867).
 
-    Writes ecf_calculated per game. No game state transition.
+    For each game with preliminary data (stage 3 success path):
+      SELECT oracle_preliminary_data, compute ECF via stage4_ecf.compute_ecf(),
+      INSERT oracle_ecf_results, INSERT oracle_lifecycle_audit (stage='4',
+      event='ecf_calculated'), record ecf_calculated event.
+      Game state remains in preliminary_analysis; Stage 5 transitions further.
+
+    Games without preliminary data (data_gather_failed in Stage 3) are skipped.
+
+    Failure path (ECF computation raises):
+      INSERT oracle_lifecycle_audit (stage='4', event='preliminary_analysis_failed'),
+      transition preliminary_analysis → preliminary_analysis_failed,
+      UPDATE oracle_game_analyses, record preliminary_analysis_failed event.
+      Dual-audit required: both oracle_play_events AND oracle_lifecycle_audit
+      (P-4b binding — PM-859).
+
+    Caller owns the transaction (DCR-W5-001); conn.commit() called once at end.
     """
     _check_kill_switch(env=env)
-    logger.info("Stage 4 stub: ECF calculation deferred to Phase 3")
 
     now = _now_utc()
+
     for game_run_id in game_run_ids:
+        row = _fetch_preliminary_record(conn, game_run_id)
+        if row is None:
+            continue
+
+        raw_payload, data_version_id, gathered_at = row
+
+        try:
+            ecf_result = compute_ecf(
+                game_run_id, data_version_id, raw_payload, gathered_at, now
+            )
+        except Exception as exc:
+            _insert_lifecycle_audit(
+                conn,
+                game_run_id=game_run_id,
+                slate_run_id=slate_run_id,
+                stage="4",
+                event="preliminary_analysis_failed",
+                detail=str(exc),
+            )
+            transition_game_state("preliminary_analysis", "preliminary_analysis_failed")
+            _update_game_status(conn, game_run_id, "preliminary_analysis_failed")
+            record_event(
+                conn, "preliminary_analysis_failed", slate_run_id, now,
+                game_run_id=game_run_id,
+            )
+            logger.warning(
+                "Stage 4: ECF failed for game_run_id=%s: %s", game_run_id, exc
+            )
+            continue
+
+        _insert_ecf_result(
+            conn,
+            ecf_result_id=ecf_result.ecf_result_id,
+            game_run_id=game_run_id,
+            data_version_id=data_version_id,
+            ecf_score=ecf_result.ecf_score,
+            component_scores={
+                "data_completeness": ecf_result.components.data_completeness,
+                "data_freshness": ecf_result.components.data_freshness,
+                "data_payload_density": ecf_result.components.data_payload_density,
+            },
+            model_version=ecf_result.model_version,
+            computed_at=now,
+        )
+        _insert_lifecycle_audit(
+            conn,
+            game_run_id=game_run_id,
+            slate_run_id=slate_run_id,
+            stage="4",
+            event="ecf_calculated",
+            detail=f"ecf_result_id={ecf_result.ecf_result_id} score={ecf_result.ecf_score:.4f}",
+        )
         record_event(
             conn, "ecf_calculated", slate_run_id, now,
             game_run_id=game_run_id,
+        )
+        logger.info(
+            "Stage 4: ecf_score=%.4f game_run_id=%s", ecf_result.ecf_score, game_run_id
         )
 
     conn.commit()
