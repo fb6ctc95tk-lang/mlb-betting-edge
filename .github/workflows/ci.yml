@@ -66,6 +66,7 @@ jobs:
           psql "$DATABASE_URL" -f database/migrations/005_add_oracle_phase1_tables.sql
           psql "$DATABASE_URL" -f database/migrations/006_add_oracle_append_only_triggers.sql
           psql "$DATABASE_URL" -f database/migrations/007_add_oracle_stage3_schema.sql
+          psql "$DATABASE_URL" -f database/migrations/008_add_oracle_stage4_schema.sql
 
       - name: Run tests
         run: python -m pytest backend/tests/
