@@ -37,6 +37,7 @@ ORACLE_TABLES = [
     "oracle_immutability_audit",
     "oracle_preliminary_data",
     "oracle_lifecycle_audit",
+    "oracle_ecf_results",
 ]
 
 PLATFORM_TABLES = [
