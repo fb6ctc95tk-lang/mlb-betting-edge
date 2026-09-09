@@ -35,7 +35,11 @@ from backend.oracle.identifier_manager import (
 )
 from backend.oracle.kill_switch import is_autonomous_run_enabled
 from backend.oracle.mlb_adapter import MLBAdapter
+from backend.oracle.mlb_intelligence import GameEngineInput
+from backend.oracle.sport_policy_store import PolicyReadOutcome
+from backend.oracle.sport_policy_store_db import MLBSportPolicyStore
 from backend.oracle.stage3_data_gather import gather_preliminary_data
+from backend.oracle.stage5_pipeline import run_stage5_pipeline
 from backend.oracle.state_machines import (
     transition_game_state,
     transition_slate_state,
@@ -543,17 +547,195 @@ def run_stage_4(
 
 
 # ---------------------------------------------------------------------------
-# Stage 5 — Intelligence Pipeline stub
+# Stage 5 — Multi-model Analysis Pipeline (Inc-3 MVP; authorized PM-1009/PM-1007)
 # ---------------------------------------------------------------------------
 
-_STAGE_5_PIPELINE_EVENTS: tuple[str, ...] = (
-    "phie_completed",
-    "gse_completed",
-    "mve_completed",
-    "ce_completed",
-    "odg_completed",
-    "srl_completed",
-)
+class Stage5PolicyUnavailableError(OrchestratorError):
+    """Raised when no active MLB sport policy is available at Stage 5."""
+
+
+class Stage5CutoffConflictError(OrchestratorError):
+    """Raised when an existing scheduled cutoff conflicts with the computed one."""
+
+
+def _load_active_mlb_policy(conn: object):
+    """Read and bind the active MLB sport policy at Stage 5 (D-4).
+
+    Raises Stage5PolicyUnavailableError if no active MLB policy exists.
+    """
+    store = MLBSportPolicyStore(conn)
+    response = store.get_active_policy("MLB")
+    if response.outcome is not PolicyReadOutcome.RECORD_RETURNED or response.record is None:
+        raise Stage5PolicyUnavailableError(
+            f"active MLB sport policy unavailable: outcome={response.outcome}"
+        )
+    return response.record
+
+
+def _fetch_latest_ecf_result(conn: object, game_run_id: str):
+    """Return (ecf_result_id, data_version_id, ecf_score, component_scores) or None."""
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT ecf_result_id, data_version_id, ecf_score, component_scores
+            FROM oracle_ecf_results
+            WHERE game_run_id = %s
+            ORDER BY computed_at DESC
+            LIMIT 1
+            """,
+            (game_run_id,),
+        )
+        return cur.fetchone()
+    finally:
+        cur.close()
+
+
+def _fetch_preliminary_payload(conn: object, game_run_id: str) -> dict:
+    """Return the latest Stage 3 raw_payload dict for game_run_id, or {}."""
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT raw_payload
+            FROM oracle_preliminary_data
+            WHERE game_run_id = %s
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            (game_run_id,),
+        )
+        row = cur.fetchone()
+    finally:
+        cur.close()
+    if row is None or row[0] is None:
+        return {}
+    payload = row[0]
+    if isinstance(payload, str):
+        payload = json.loads(payload)
+    return payload
+
+
+def _fetch_first_pitch_time(conn: object, game_run_id: str):
+    """Return the first_pitch_time for game_run_id, or None."""
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "SELECT first_pitch_time FROM oracle_game_analyses WHERE game_run_id = %s",
+            (game_run_id,),
+        )
+        row = cur.fetchone()
+    finally:
+        cur.close()
+    return row[0] if row is not None else None
+
+
+def _insert_stage5_result(conn: object, result) -> None:
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            INSERT INTO oracle_stage5_results
+                (stage5_result_id, game_run_id, slate_run_id, ecf_result_id,
+                 data_version_id, verdict, engine_outputs, model_version, computed_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            (result.stage5_result_id, result.game_run_id, result.slate_run_id,
+             result.ecf_result_id, result.data_version_id, result.verdict,
+             json.dumps(result.engine_outputs), result.model_version, result.computed_at),
+        )
+    finally:
+        cur.close()
+
+
+def _insert_preliminary_output(conn: object, result) -> None:
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            INSERT INTO oracle_preliminary_outputs
+                (game_run_id, slate_run_id, stage5_result_id, consumer_status,
+                 verdict, output_payload)
+            VALUES (%s, %s, %s, 'Preliminary', %s, %s)
+            """,
+            (result.game_run_id, result.slate_run_id, result.stage5_result_id,
+             result.verdict, json.dumps(result.preliminary_output_payload())),
+        )
+    finally:
+        cur.close()
+
+
+def _fetch_scheduled_cutoff(conn: object, game_run_id: str):
+    """Return (slate_run_id, scheduled_cutoff_at, policy_version_id) or None."""
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT slate_run_id, scheduled_cutoff_at, policy_version_id
+            FROM oracle_scheduled_cutoffs
+            WHERE game_run_id = %s
+            """,
+            (game_run_id,),
+        )
+        return cur.fetchone()
+    finally:
+        cur.close()
+
+
+def _insert_scheduled_cutoff(
+    conn: object,
+    game_run_id: str,
+    slate_run_id: str,
+    scheduled_cutoff_at: object,
+    policy_version_id: str,
+) -> None:
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            INSERT INTO oracle_scheduled_cutoffs
+                (game_run_id, slate_run_id, scheduled_cutoff_at, policy_version_id)
+            VALUES (%s, %s, %s, %s)
+            """,
+            (game_run_id, slate_run_id, scheduled_cutoff_at, policy_version_id),
+        )
+    finally:
+        cur.close()
+
+
+def _persist_scheduled_cutoff_with_replay(
+    conn: object,
+    game_run_id: str,
+    slate_run_id: str,
+    scheduled_cutoff_at: object,
+    policy_version_id: str,
+) -> None:
+    """Insert the cutoff, or accept an equal existing row as idempotent replay.
+
+    Replay semantics (PM-1007 §4): natural key is game_run_id; an existing row
+    with identical slate, cutoff timestamp, and policy version is an idempotent
+    replay (no duplicate). An existing row with any differing immutable value
+    raises Stage5CutoffConflictError (deterministic conflict → rollback). A
+    uniqueness violation alone is never treated as successful idempotency.
+    """
+    existing = _fetch_scheduled_cutoff(conn, game_run_id)
+    if existing is None:
+        _insert_scheduled_cutoff(
+            conn, game_run_id, slate_run_id, scheduled_cutoff_at, policy_version_id
+        )
+        return
+    existing_slate, existing_cutoff, existing_policy = existing
+    if (
+        existing_slate == slate_run_id
+        and existing_cutoff == scheduled_cutoff_at
+        and existing_policy == policy_version_id
+    ):
+        return  # idempotent replay — identical immutable values
+    raise Stage5CutoffConflictError(
+        f"scheduled cutoff conflict for {game_run_id}: existing "
+        f"({existing_slate}, {existing_cutoff}, {existing_policy}) != computed "
+        f"({slate_run_id}, {scheduled_cutoff_at}, {policy_version_id})"
+    )
 
 
 def run_stage_5(
@@ -562,26 +744,104 @@ def run_stage_5(
     game_run_ids: list[str],
     env: dict | None = None,
 ) -> None:
-    """Stage 5 stub — Intelligence Pipeline (all engines deferred to Phase 3).
+    """Stage 5 — Multi-model Analysis Pipeline (Inc-3 MVP; PM-1009 under PM-1007).
 
-    Writes phie_completed, gse_completed, mve_completed, ce_completed,
-    odg_completed, srl_completed per game, in that order.
-    Transitions each game: preliminary_analysis → lineup_monitoring.
+    Ratified R1 boundary. For each game with a Stage 4 ECF result:
+      - consume the ECF result and its data-version identity;
+      - run the four-engine MVP (GSE, MVE, ODG, SRL) via stage5_pipeline;
+      - persist one immutable Stage 5 result and one immutable Preliminary
+        consumer output;
+      - durably persist the scheduled cutoff (first pitch + active MLB-A3-v1
+        offset) with replay semantics;
+      - write a lifecycle audit row to oracle_lifecycle_audit (D-5);
+      - transition the game preliminary_analysis → lineup_monitoring;
+      - emit multi_model_analysis_completed only after successful persistence.
+
+    All effects commit atomically in one Orchestrator-owned transaction; any
+    failure rolls the whole stage back with no partial result (DCR-W5-001).
+    Stage 5 does NOT open the activation window (operative Stage 8) and never
+    emits phie_completed or ce_completed (PHIE/CE deferred; PM-1007 D-2). Games
+    without a Stage 4 ECF result are skipped.
     """
     _check_kill_switch(env=env)
-    logger.info("Stage 5 stub: intelligence pipeline deferred to Phase 3")
 
+    policy = _load_active_mlb_policy(conn)
     now = _now_utc()
+
+    # Compute phase — reads only; engines are pure and deterministic.
+    engine_inputs: list[GameEngineInput] = []
     for game_run_id in game_run_ids:
-        for event_type in _STAGE_5_PIPELINE_EVENTS:
+        ecf_row = _fetch_latest_ecf_result(conn, game_run_id)
+        if ecf_row is None:
+            continue
+        ecf_result_id, data_version_id, ecf_score, component_scores = ecf_row
+        if isinstance(component_scores, str):
+            component_scores = json.loads(component_scores)
+        first_pitch_time = _fetch_first_pitch_time(conn, game_run_id)
+        if first_pitch_time is None:
+            continue
+        payload = _fetch_preliminary_payload(conn, game_run_id)
+        engine_inputs.append(
+            GameEngineInput(
+                game_run_id=game_run_id,
+                ecf_result_id=ecf_result_id,
+                data_version_id=data_version_id,
+                ecf_score=float(ecf_score),
+                ecf_components=component_scores or {},
+                ecf_model_version="",
+                preliminary_payload=payload,
+                first_pitch_time=first_pitch_time,
+                market_moneyline=None,
+            )
+        )
+
+    if not engine_inputs:
+        logger.info("Stage 5: no games with Stage 4 results; nothing to process")
+        conn.commit()
+        return
+
+    results = run_stage5_pipeline(slate_run_id, engine_inputs, now)
+    first_pitch_by_game = {i.game_run_id: i.first_pitch_time for i in engine_inputs}
+
+    # Persist phase — atomic across the slate; any failure rolls everything back.
+    try:
+        for game_run_id, result in results.items():
+            _insert_stage5_result(conn, result)
+            _insert_preliminary_output(conn, result)
+
+            scheduled_cutoff_at = first_pitch_by_game[game_run_id] + policy.time_cutoff_offset
+            _persist_scheduled_cutoff_with_replay(
+                conn, game_run_id, slate_run_id, scheduled_cutoff_at,
+                policy.policy_version_id,
+            )
+
+            _insert_lifecycle_audit(
+                conn,
+                game_run_id=game_run_id,
+                slate_run_id=slate_run_id,
+                stage="5",
+                event="multi_model_analysis_completed",
+                detail=(
+                    f"stage5_result_id={result.stage5_result_id} "
+                    f"verdict={result.verdict} policy={policy.policy_version_id}"
+                ),
+            )
+
+            transition_game_state("preliminary_analysis", "lineup_monitoring")
+            _update_game_status(conn, game_run_id, "lineup_monitoring")
+
             record_event(
-                conn, event_type, slate_run_id, now,
+                conn, "multi_model_analysis_completed", slate_run_id, now,
                 game_run_id=game_run_id,
             )
-        transition_game_state("preliminary_analysis", "lineup_monitoring")
-        _update_game_status(conn, game_run_id, "lineup_monitoring")
-
-    conn.commit()
+            logger.info(
+                "Stage 5: game_run_id=%s verdict=%s stage5_result_id=%s",
+                game_run_id, result.verdict, result.stage5_result_id,
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
 
 
 # ---------------------------------------------------------------------------

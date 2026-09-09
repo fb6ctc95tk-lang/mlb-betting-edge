@@ -55,18 +55,19 @@ jobs:
           echo "a71d7b6aa8b75db83638ded5b2f2431cd81fde969f2a42dda11a22d8f7dd0cf4  backend/oracle/adapter_interface.py" | sha256sum --check
           echo "86ada9410b282d8760c8581f29b87cc5a77ad6a6a491a3be6301ed65e686656b  backend/oracle/sport_policy_store.py" | sha256sum --check
           echo "8a3c4f9177b070a2b2ba9ce9960536232dcddc6ffd2645e1fc8b8fc184bd76cd  backend/oracle/consumer_admin_interface.py" | sha256sum --check
-          echo "86f8e99d484ea288017414c90a3ec7c081d724c28c7e77329e72ef4e4af6d726  backend/oracle/event_store.py" | sha256sum --check
+          echo "a2b39dccf6a373f8428ce0d8a3f8fee0d297eedcfaec6e302fc98c5a18781c3f  backend/oracle/event_store.py" | sha256sum --check
 
       - name: Apply database schema and migrations
         run: |
-          psql "$DATABASE_URL" -f database/schema.sql
-          psql "$DATABASE_URL" -f database/migrations/002_add_game_weather.sql
-          psql "$DATABASE_URL" -f database/migrations/003_add_team_bullpen_context.sql
-          psql "$DATABASE_URL" -f database/migrations/004_add_team_injuries.sql
-          psql "$DATABASE_URL" -f database/migrations/005_add_oracle_phase1_tables.sql
-          psql "$DATABASE_URL" -f database/migrations/006_add_oracle_append_only_triggers.sql
-          psql "$DATABASE_URL" -f database/migrations/007_add_oracle_stage3_schema.sql
-          psql "$DATABASE_URL" -f database/migrations/008_add_oracle_stage4_schema.sql
+          set -euo pipefail
+          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f database/schema.sql
+          # Deterministic discovery: apply every numbered migration in lexical
+          # (== numeric) filename order. Any newly committed migration is applied
+          # automatically; omission is impossible and any error fails the job.
+          for migration in $(ls database/migrations/*.sql | sort); do
+            echo "Applying migration: $migration"
+            psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f "$migration"
+          done
 
       - name: Run tests
         run: python -m pytest backend/tests/

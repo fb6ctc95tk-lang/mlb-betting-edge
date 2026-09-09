@@ -38,7 +38,29 @@ ORACLE_TABLES = [
     "oracle_preliminary_data",
     "oracle_lifecycle_audit",
     "oracle_ecf_results",
+    # Inc-3 Stage 5 (migration 009)
+    "oracle_stage5_results",
+    "oracle_preliminary_outputs",
+    "oracle_scheduled_cutoffs",
+    "oracle_sport_policies",
+    "oracle_sport_policy_active",
 ]
+
+# Stage 5 (migration 009) tables — registered explicitly to prevent recurrence
+# of the Stage 4 approved-table omission (PM-1007 §6).
+STAGE5_TABLES = [
+    "oracle_stage5_results",
+    "oracle_preliminary_outputs",
+    "oracle_scheduled_cutoffs",
+    "oracle_sport_policies",
+    "oracle_sport_policy_active",
+]
+
+_MIGRATIONS_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    "database",
+    "migrations",
+)
 
 PLATFORM_TABLES = [
     "teams",
@@ -649,3 +671,129 @@ def test_no_unapproved_oracle_tables(conn):
     cur.close()
     unexpected = found - set(ORACLE_TABLES)
     assert not unexpected, f"Unapproved Oracle tables found: {unexpected}"
+
+
+# ---------------------------------------------------------------------------
+# L. Migration completeness and deterministic discovery (Inc-3; PM-1007 §§6-7)
+# ---------------------------------------------------------------------------
+
+def _numbered_migration_files():
+    names = [
+        f for f in os.listdir(_MIGRATIONS_DIR)
+        if f.endswith(".sql") and f[:3].isdigit()
+    ]
+    return sorted(names)
+
+
+def test_migration_files_are_numerically_prefixed_and_unique():
+    files = _numbered_migration_files()
+    numbers = [int(f[:3]) for f in files]
+    assert len(numbers) == len(set(numbers)), "Duplicate migration numbers detected"
+
+
+def test_migration_lexical_order_matches_numeric_order():
+    """CI applies migrations in lexical filename order; it must equal numeric order."""
+    files = _numbered_migration_files()
+    lexical = list(files)
+    numeric = sorted(files, key=lambda f: int(f[:3]))
+    assert lexical == numeric, (
+        "Lexical and numeric migration orders diverge; deterministic CI discovery "
+        f"would apply out of order. lexical={lexical} numeric={numeric}"
+    )
+
+
+def test_migration_009_present():
+    files = _numbered_migration_files()
+    assert any(f.startswith("009_") for f in files), (
+        "Migration 009 (Stage 5 schema) is missing from database/migrations/"
+    )
+
+
+def test_stage5_tables_exist(conn):
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT table_name
+        FROM information_schema.tables
+        WHERE table_schema = 'public'
+          AND table_name = ANY(%s)
+        """,
+        (STAGE5_TABLES,),
+    )
+    found = {row[0] for row in cur.fetchall()}
+    cur.close()
+    assert found == set(STAGE5_TABLES), (
+        f"Missing Stage 5 tables: {set(STAGE5_TABLES) - found}"
+    )
+
+
+def test_stage5_tables_have_append_only_triggers(conn):
+    """Every Stage 5 table must carry UPDATE and DELETE append-only guards."""
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT event_object_table, event_manipulation
+        FROM information_schema.triggers
+        WHERE trigger_schema = 'public'
+          AND event_object_table = ANY(%s)
+        """,
+        (STAGE5_TABLES,),
+    )
+    rows = cur.fetchall()
+    cur.close()
+    guarded: dict[str, set] = {}
+    for table, manipulation in rows:
+        guarded.setdefault(table, set()).add(manipulation)
+    for table in STAGE5_TABLES:
+        assert table in guarded, f"{table} has no append-only trigger"
+        assert {"UPDATE", "DELETE"} <= guarded[table], (
+            f"{table} missing UPDATE/DELETE append-only guard"
+        )
+
+
+def test_seeded_policy_update_is_rejected(conn):
+    """Behavioral proof: UPDATE on the seeded policy row is blocked by the trigger."""
+    cur = conn.cursor()
+    with pytest.raises(psycopg2.errors.RaiseException):
+        cur.execute(
+            "UPDATE oracle_sport_policies SET governance_reference = 'X' "
+            "WHERE policy_version_id = 'MLB-A3-v1'"
+        )
+    cur.close()
+
+
+def test_sport_policy_mlb_a3_v1_seeded_and_active(conn):
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT time_cutoff_offset_seconds, governance_reference "
+        "FROM oracle_sport_policies WHERE policy_version_id = 'MLB-A3-v1'"
+    )
+    policy_row = cur.fetchone()
+    cur.execute(
+        "SELECT policy_version_id FROM oracle_sport_policy_active "
+        "WHERE sport_id = 'MLB' ORDER BY id DESC LIMIT 1"
+    )
+    active_row = cur.fetchone()
+    cur.close()
+    assert policy_row is not None, "MLB-A3-v1 policy not seeded"
+    assert policy_row[0] == -900, "MLB-A3-v1 cutoff offset must be -900 seconds"
+    assert policy_row[1] == "PM-1007"
+    assert active_row is not None and active_row[0] == "MLB-A3-v1", (
+        "MLB-A3-v1 must be the active MLB policy version"
+    )
+
+
+def test_migration_009_is_rerunnable(conn):
+    """Re-applying migration 009 must not error or duplicate the seed."""
+    path = os.path.join(_MIGRATIONS_DIR, "009_add_oracle_stage5_schema.sql")
+    with open(path, "r", encoding="utf-8") as fh:
+        sql = fh.read()
+    cur = conn.cursor()
+    cur.execute(sql)
+    cur.execute("SELECT COUNT(*) FROM oracle_sport_policies WHERE policy_version_id = 'MLB-A3-v1'")
+    policy_count = cur.fetchone()[0]
+    cur.execute("SELECT COUNT(*) FROM oracle_sport_policy_active WHERE policy_version_id = 'MLB-A3-v1'")
+    active_count = cur.fetchone()[0]
+    cur.close()
+    assert policy_count == 1, "Re-running migration 009 duplicated the policy seed"
+    assert active_count == 1, "Re-running migration 009 duplicated the active designation"

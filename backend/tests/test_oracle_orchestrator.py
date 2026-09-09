@@ -33,7 +33,7 @@ Sections:
 from __future__ import annotations
 
 import os
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from unittest.mock import MagicMock, call, patch
 
 import pytest
@@ -1446,52 +1446,98 @@ class TestStage4EcfCalculation:
         assert len(update_cursors) == 0
 
 
-class TestStage5IntelligencePipeline:
-    """R — Stage 5 stub: 6 pipeline events per game; game→lineup_monitoring."""
+class _FakePolicy:
+    """Stand-in for the active MLB-A3-v1 sport policy record."""
+    policy_version_id = "MLB-A3-v1"
+    time_cutoff_offset = timedelta(minutes=-15)
 
-    _EXPECTED_ORDER = (
-        "phie_completed", "gse_completed", "mve_completed",
-        "ce_completed", "odg_completed", "srl_completed",
+
+def _fake_ecf_row(game_run_id):
+    return (
+        f"ECFR-{game_run_id}",
+        f"DV-{game_run_id}",
+        0.9,
+        {"data_completeness": 0.9, "data_freshness": 0.9, "data_payload_density": 0.8},
     )
 
-    def _run(self, conn=None, env=_ENABLED_ENV):
+
+_PATCH_LOAD_POLICY = "backend.oracle.orchestrator._load_active_mlb_policy"
+_PATCH_FETCH_ECF = "backend.oracle.orchestrator._fetch_latest_ecf_result"
+_PATCH_FETCH_FIRST_PITCH = "backend.oracle.orchestrator._fetch_first_pitch_time"
+_PATCH_FETCH_PAYLOAD = "backend.oracle.orchestrator._fetch_preliminary_payload"
+
+
+class TestStage5IntelligencePipeline:
+    """R — Stage 5 MVP: four-engine pipeline; multi_model_analysis_completed;
+    game→lineup_monitoring; result/output/cutoff/audit persisted; atomic commit.
+    (Inc-3; PM-1009 under PM-1007. Replaces the retired stub coverage.)"""
+
+    def _run(self, conn=None, env=_ENABLED_ENV, ecf_side_effect=None):
         if conn is None:
             conn = _StageConn()
-        with patch(_PATCH_RECORD_EVENT, return_value=1) as mock_re:
+        first_pitch = datetime(2026, 7, 25, 17, 10, tzinfo=timezone.utc)
+        fetch_ecf = ecf_side_effect or (lambda c, grid: _fake_ecf_row(grid))
+        with patch(_PATCH_LOAD_POLICY, return_value=_FakePolicy()), \
+             patch(_PATCH_FETCH_ECF, side_effect=fetch_ecf), \
+             patch(_PATCH_FETCH_FIRST_PITCH, return_value=first_pitch), \
+             patch(_PATCH_FETCH_PAYLOAD, return_value={"home_pitcher": "A", "away_pitcher": "B"}), \
+             patch(_PATCH_RECORD_EVENT, return_value=1) as mock_re:
             run_stage_5(conn, _TEST_SLATE_ID, _TEST_GAME_IDS, env=env)
         return conn, mock_re
 
-    def test_writes_six_pipeline_events_per_game(self):
+    def test_emits_multi_model_analysis_completed_per_game(self):
         _, mock_re = self._run()
-        assert mock_re.call_count == 12
+        event_types = [c[0][1] for c in mock_re.call_args_list]
+        assert event_types == ["multi_model_analysis_completed"] * 2
 
-    def test_pipeline_event_order_per_game(self):
+    def test_does_not_emit_phie_or_ce_events(self):
         _, mock_re = self._run()
-        game1_events = [c[0][1] for c in mock_re.call_args_list[:6]]
-        assert game1_events == list(self._EXPECTED_ORDER)
-
-    def test_phie_is_first_event_per_game(self):
-        _, mock_re = self._run()
-        assert mock_re.call_args_list[0][0][1] == "phie_completed"
-
-    def test_srl_is_last_event_per_game(self):
-        _, mock_re = self._run()
-        assert mock_re.call_args_list[5][0][1] == "srl_completed"
+        event_types = [c[0][1] for c in mock_re.call_args_list]
+        assert "phie_completed" not in event_types
+        assert "ce_completed" not in event_types
 
     def test_updates_game_status_to_lineup_monitoring(self):
         conn, _ = self._run()
-        update_cursors = [c for c in conn.cursors if any("UPDATE" in s.upper() and "oracle_game_analyses" in s.lower() for s in c.sql_log)]
+        update_cursors = [
+            c for c in conn.cursors
+            if any("UPDATE" in s.upper() and "oracle_game_analyses" in s.lower() for s in c.sql_log)
+        ]
         assert len(update_cursors) == 2
         for c in update_cursors:
             assert "lineup_monitoring" in c.params_log[0]
+
+    def test_persists_stage5_result_and_preliminary_output(self):
+        conn, _ = self._run()
+        all_sql = " ".join(s.lower() for c in conn.cursors for s in c.sql_log)
+        assert "oracle_stage5_results" in all_sql
+        assert "oracle_preliminary_outputs" in all_sql
+
+    def test_persists_scheduled_cutoff(self):
+        conn, _ = self._run()
+        all_sql = " ".join(s.lower() for c in conn.cursors for s in c.sql_log)
+        assert "oracle_scheduled_cutoffs" in all_sql
+
+    def test_writes_lifecycle_audit_at_stage_5(self):
+        conn, _ = self._run()
+        audit_cursors = [
+            c for c in conn.cursors
+            if any("oracle_lifecycle_audit" in s.lower() for s in c.sql_log)
+        ]
+        assert audit_cursors
+        assert any("5" in c.params_log[0] for c in audit_cursors)
 
     def test_commits_exactly_once(self):
         conn, _ = self._run()
         assert conn.commit_count == 1
 
-    def test_does_not_rollback(self):
+    def test_does_not_rollback_on_success(self):
         conn, _ = self._run()
         assert not conn.rollback_called
+
+    def test_skips_games_without_ecf_result(self):
+        conn, mock_re = self._run(ecf_side_effect=lambda c, grid: None)
+        assert mock_re.call_count == 0
+        assert conn.commit_count == 1  # empty commit, no work
 
 
 class TestStage6LineupMonitoring:
@@ -1706,20 +1752,25 @@ class TestEventOrderingAndCorrectness:
             run_stage_4(conn, _TEST_SLATE_ID, _TEST_GAME_IDS, env=_ENABLED_ENV)
         assert mock_re.call_count == 2
 
-    def test_stage5_writes_twelve_events_total(self):
+    def _run_stage5(self, mock_re_name="mock_re"):
         conn = _StageConn()
-        with patch(_PATCH_RECORD_EVENT, return_value=1) as mock_re:
+        first_pitch = datetime(2026, 7, 25, 17, 10, tzinfo=timezone.utc)
+        with patch(_PATCH_LOAD_POLICY, return_value=_FakePolicy()), \
+             patch(_PATCH_FETCH_ECF, side_effect=lambda c, grid: _fake_ecf_row(grid)), \
+             patch(_PATCH_FETCH_FIRST_PITCH, return_value=first_pitch), \
+             patch(_PATCH_FETCH_PAYLOAD, return_value={"home_pitcher": "A", "away_pitcher": "B"}), \
+             patch(_PATCH_RECORD_EVENT, return_value=1) as mock_re:
             run_stage_5(conn, _TEST_SLATE_ID, _TEST_GAME_IDS, env=_ENABLED_ENV)
-        assert mock_re.call_count == 12
+        return conn, mock_re
 
-    def test_stage5_all_six_pipeline_event_types_present(self):
-        conn = _StageConn()
-        with patch(_PATCH_RECORD_EVENT, return_value=1) as mock_re:
-            run_stage_5(conn, _TEST_SLATE_ID, _TEST_GAME_IDS, env=_ENABLED_ENV)
+    def test_stage5_writes_one_completion_event_per_game(self):
+        _, mock_re = self._run_stage5()
+        assert mock_re.call_count == 2
+
+    def test_stage5_emits_only_multi_model_completion_event(self):
+        _, mock_re = self._run_stage5()
         seen = {c[0][1] for c in mock_re.call_args_list}
-        expected = {"phie_completed", "gse_completed", "mve_completed",
-                    "ce_completed", "odg_completed", "srl_completed"}
-        assert seen == expected
+        assert seen == {"multi_model_analysis_completed"}
 
 
 # ---------------------------------------------------------------------------
@@ -2088,9 +2139,14 @@ class TestPreliminaryAnalysisFailedEventType:
         from backend.oracle.event_store import _EVENT_TYPES
         assert "preliminary_analysis_failed" in _EVENT_TYPES
 
-    def test_event_type_count_is_33(self):
+    def test_event_type_count_is_34(self):
+        # Inc-3 P-4b (PM-1007 §5) adds multi_model_analysis_completed: 33 -> 34.
         from backend.oracle.event_store import _EVENT_TYPES
-        assert len(_EVENT_TYPES) == 33
+        assert len(_EVENT_TYPES) == 34
+
+    def test_multi_model_analysis_completed_is_registered(self):
+        from backend.oracle.event_store import _EVENT_TYPES
+        assert "multi_model_analysis_completed" in _EVENT_TYPES
 
     def test_ecf_calculated_still_present(self):
         from backend.oracle.event_store import _EVENT_TYPES

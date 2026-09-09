@@ -149,12 +149,13 @@ _APPROVED_EVENT_TYPES: frozenset[str] = frozenset({
     "preliminary_data_gathered",
     "data_gather_failed",
     "preliminary_analysis_failed",
+    "multi_model_analysis_completed",
 })
 
 
 class TestEventTypeRegistry:
-    def test_registry_contains_exactly_33_types(self):
-        assert len(_EVENT_TYPES) == 33
+    def test_registry_contains_exactly_34_types(self):
+        assert len(_EVENT_TYPES) == 34
 
     def test_registry_matches_approved_enumeration(self):
         assert _EVENT_TYPES == _APPROVED_EVENT_TYPES
@@ -164,7 +165,7 @@ class TestEventTypeRegistry:
 
     def test_registry_has_no_duplicates(self):
         """frozenset guarantees uniqueness; source list was also duplicate-free."""
-        assert len(_EVENT_TYPES) == 33
+        assert len(_EVENT_TYPES) == 34
 
     def test_registry_immutable_no_add_method(self):
         with pytest.raises(AttributeError):

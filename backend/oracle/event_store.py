@@ -16,9 +16,10 @@ from backend.oracle.identifier_manager import (
 
 
 # ---------------------------------------------------------------------------
-# Event type registry — 33 approved types (DCR-W5-001 §15; Inc-1 D-3 adds
-# preliminary_data_gathered and data_gather_failed; enumeration is
-# authoritative despite planning text labelling the list as "27")
+# Event type registry — 34 approved types (DCR-W5-001 §15; Inc-1 D-3 adds
+# preliminary_data_gathered and data_gather_failed; Inc-3 P-4b (PM-1007 §5)
+# adds multi_model_analysis_completed; enumeration is authoritative despite
+# planning text labelling the list as "27")
 # ---------------------------------------------------------------------------
 
 _EVENT_TYPES: frozenset[str] = frozenset({
@@ -55,6 +56,7 @@ _EVENT_TYPES: frozenset[str] = frozenset({
     "preliminary_data_gathered",
     "data_gather_failed",
     "preliminary_analysis_failed",
+    "multi_model_analysis_completed",
 })
 
 
@@ -74,13 +76,13 @@ def record_event(
     one cursor. It does not commit, roll back, or close the connection.
 
     Validation order:
-        1. event_type validated against the 28-type registry (before cursor open).
+        1. event_type validated against the 34-type registry (before cursor open).
         2. slate_run_id validated against the Slate Run ID format (before cursor open).
         3. Cursor opened; INSERT executed; cursor closed.
 
     Args:
         conn: Caller-supplied psycopg2 connection with autocommit=False.
-        event_type: One of the 28 approved Oracle event types.
+        event_type: One of the 34 approved Oracle event types.
         slate_run_id: A valid Slate Run ID (ORACLE-YYYYMMDD-NNN).
         event_timestamp: UTC timestamp for this event.
         game_run_id: Optional Game Analysis Run ID; None for slate-level events.
