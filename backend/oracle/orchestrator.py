@@ -34,12 +34,23 @@ from backend.oracle.identifier_manager import (
     generate_slate_run_id,
 )
 from backend.oracle.kill_switch import is_autonomous_run_enabled
-from backend.oracle.mlb_adapter import MLBAdapter
+from backend.oracle.mlb_adapter import (
+    LINEUP_OBSERVED_FULL,
+    LINEUP_PARTIAL,
+    MLBAdapter,
+)
 from backend.oracle.mlb_intelligence import GameEngineInput
 from backend.oracle.sport_policy_store import PolicyReadOutcome
 from backend.oracle.sport_policy_store_db import MLBSportPolicyStore
 from backend.oracle.stage3_data_gather import gather_preliminary_data
 from backend.oracle.stage5_pipeline import run_stage5_pipeline
+from backend.oracle.stage6_lineup import (
+    Stage6Result,
+    canonical_from_stored,
+    canonical_snapshot,
+    compute_snapshot_identity,
+    detect_material_change,
+)
 from backend.oracle.state_machines import (
     transition_game_state,
     transition_slate_state,
@@ -845,31 +856,204 @@ def run_stage_5(
 
 
 # ---------------------------------------------------------------------------
-# Stage 6 — Lineup Monitoring stub
+# Stage 6 — Evidence-Safe Lineup Monitoring (Inc-3+ Option B; PM-1031/PM-1029)
 # ---------------------------------------------------------------------------
+
+class Stage6ReplayConflictError(OrchestratorError):
+    """Raised when an existing observation shares a snapshot identity but has
+    conflicting immutable stored values (data-integrity conflict → rollback)."""
+
+
+def _fetch_lineup_observation_by_identity(conn: object, game_run_id: str, snapshot_identity: str):
+    """Return stored canonical fields for an existing (game, snapshot) row, or None."""
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT home_lineup, away_lineup, home_starting_pitcher, away_starting_pitcher,
+                   home_lineup_status, away_lineup_status
+            FROM oracle_lineup_observations
+            WHERE game_run_id = %s AND snapshot_identity = %s
+            LIMIT 1
+            """,
+            (game_run_id, snapshot_identity),
+        )
+        return cur.fetchone()
+    finally:
+        cur.close()
+
+
+def _fetch_latest_lineup_observation(conn: object, game_run_id: str):
+    """Return (snapshot_identity, home_lineup, away_lineup, home_sp, away_sp,
+    home_status, away_status) for the latest canonical observation, or None."""
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT snapshot_identity, home_lineup, away_lineup, home_starting_pitcher,
+                   away_starting_pitcher, home_lineup_status, away_lineup_status
+            FROM oracle_lineup_observations
+            WHERE game_run_id = %s
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (game_run_id,),
+        )
+        return cur.fetchone()
+    finally:
+        cur.close()
+
+
+def _insert_lineup_observation(
+    conn: object, game_run_id: str, slate_run_id: str, snapshot_identity: str,
+    observed_at: object, obs, policy_version_id: str, change_detected: bool,
+    change_evidence: dict, prior_snapshot_identity: str | None,
+) -> None:
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            INSERT INTO oracle_lineup_observations
+                (game_run_id, slate_run_id, snapshot_identity, observed_at, source,
+                 home_lineup, away_lineup, home_lineup_status, away_lineup_status,
+                 home_starting_pitcher, away_starting_pitcher, policy_version_id,
+                 change_detected, change_evidence, prior_snapshot_identity)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            (game_run_id, slate_run_id, snapshot_identity, observed_at, obs.source,
+             json.dumps(list(obs.home_order)), json.dumps(list(obs.away_order)),
+             obs.home_lineup_status, obs.away_lineup_status,
+             json.dumps(obs.home_pitcher), json.dumps(obs.away_pitcher),
+             policy_version_id, change_detected, json.dumps(change_evidence),
+             prior_snapshot_identity),
+        )
+    finally:
+        cur.close()
+
 
 def run_stage_6(
     conn: object,
     slate_run_id: str,
     game_run_ids: list[str],
     env: dict | None = None,
-) -> None:
-    """Stage 6 stub — Lineup Monitoring (polling loop deferred to Phase 2).
+) -> list[Stage6Result]:
+    """Stage 6 — Evidence-Safe Lineup Monitoring (Option B; PM-1031/PM-1033 under PM-1029).
 
-    Writes lineup_observation_recorded per game. Games remain in
-    lineup_monitoring state until Stage 7.
+    Returns one explicit, immutable Stage6Result per game evaluated (PM-1033):
+    the caller can distinguish UNAVAILABLE / PARTIAL / OBSERVED_FULL and the
+    persisted / replay / change_detected facts without parsing logs, querying
+    the database, or reading lifecycle-audit rows. This return contract is
+    purely additive: it changes no classification, persistence rule, snapshot
+    identity, event, or product meaning. On DB/transaction failure the whole
+    stage rolls back and RAISES (no false success result is returned).
+
+    One real, synchronous, idempotent lineup observation per game per invocation
+    (no loop, timer, scheduler, worker, or retry). All MLB network access is in
+    the adapter; this Core function only persists/decides. Per game:
+      - obtain the adapter's evidence-safe LineupObservation;
+      - UNAVAILABLE / PARTIAL → caller-visible outcome; lifecycle-audit note only;
+        NO observation row, NO lineup event, NO state progress, NO recalculation;
+      - OBSERVED_FULL → compute the deterministic snapshot identity;
+          * identical replay (same identity, matching immutable values) → no
+            duplicate row/event;
+          * conflicting immutable replay → Stage6ReplayConflictError (rollback);
+          * otherwise persist one immutable observation, emit
+            lineup_observation_recorded, and emit lineup_change_detected iff the
+            observed snapshot differs materially from the prior canonical one.
+
+    Never emits lineup_confirmed or recalculation_triggered and never produces
+    AUTHORITATIVELY_CONFIRMED (no authoritative provider semantics exist).
+    Stage 6 remains in lineup_monitoring (no game_status change / transition);
+    Stage 7 owns recalculation and the transition to final_analysis. One
+    Orchestrator-owned transaction; any failure rolls the whole stage back.
     """
     _check_kill_switch(env=env)
-    logger.info("Stage 6 stub: lineup monitoring/polling deferred to Phase 2")
 
+    policy = _load_active_mlb_policy(conn)
     now = _now_utc()
-    for game_run_id in game_run_ids:
-        record_event(
-            conn, "lineup_observation_recorded", slate_run_id, now,
-            game_run_id=game_run_id,
-        )
+    adapter = MLBAdapter()
+    results: list[Stage6Result] = []
 
-    conn.commit()
+    try:
+        for game_run_id in game_run_ids:
+            game_id = game_run_id.rsplit("-", 1)[-1]
+            obs = adapter.observe_lineup(game_id)
+
+            if obs.classification != LINEUP_OBSERVED_FULL:
+                # UNAVAILABLE or PARTIAL: audit-only; not a successful observation.
+                _insert_lifecycle_audit(
+                    conn, game_run_id=game_run_id, slate_run_id=slate_run_id,
+                    stage="6", event="lineup_observation_unavailable",
+                    detail=f"classification={obs.classification} status={obs.detail}",
+                )
+                results.append(Stage6Result(
+                    game_run_id=game_run_id, classification=obs.classification,
+                    persisted=False, replay=False, change_detected=False,
+                    reason=(obs.detail or obs.classification),
+                ))
+                logger.info(
+                    "Stage 6: game_run_id=%s classification=%s (no observation persisted)",
+                    game_run_id, obs.classification,
+                )
+                continue
+
+            snapshot_identity = compute_snapshot_identity(game_run_id, obs)
+            current_canon = canonical_snapshot(obs)
+
+            existing = _fetch_lineup_observation_by_identity(conn, game_run_id, snapshot_identity)
+            if existing is not None:
+                if canonical_from_stored(*existing) != current_canon:
+                    raise Stage6ReplayConflictError(
+                        f"conflicting immutable replay for {game_run_id} / {snapshot_identity}"
+                    )
+                results.append(Stage6Result(
+                    game_run_id=game_run_id, classification=LINEUP_OBSERVED_FULL,
+                    persisted=False, replay=True, change_detected=False,
+                    snapshot_identity=snapshot_identity,
+                ))
+                logger.info(
+                    "Stage 6: idempotent replay game_run_id=%s snapshot=%s",
+                    game_run_id, snapshot_identity,
+                )
+                continue
+
+            prior = _fetch_latest_lineup_observation(conn, game_run_id)
+            prior_identity = prior[0] if prior else None
+            prior_canon = canonical_from_stored(*prior[1:]) if prior else None
+            change_detected, change_evidence = detect_material_change(current_canon, prior_canon)
+
+            _insert_lineup_observation(
+                conn, game_run_id, slate_run_id, snapshot_identity, now, obs,
+                policy.policy_version_id, change_detected, change_evidence, prior_identity,
+            )
+            record_event(
+                conn, "lineup_observation_recorded", slate_run_id, now,
+                game_run_id=game_run_id,
+            )
+            if change_detected:
+                record_event(
+                    conn, "lineup_change_detected", slate_run_id, now,
+                    game_run_id=game_run_id,
+                )
+            _insert_lifecycle_audit(
+                conn, game_run_id=game_run_id, slate_run_id=slate_run_id,
+                stage="6", event="lineup_observation_recorded",
+                detail=f"snapshot={snapshot_identity} change_detected={change_detected}",
+            )
+            results.append(Stage6Result(
+                game_run_id=game_run_id, classification=LINEUP_OBSERVED_FULL,
+                persisted=True, replay=False, change_detected=change_detected,
+                snapshot_identity=snapshot_identity,
+            ))
+            logger.info(
+                "Stage 6: recorded game_run_id=%s snapshot=%s change_detected=%s",
+                game_run_id, snapshot_identity, change_detected,
+            )
+        conn.commit()
+        return results
+    except Exception:
+        conn.rollback()
+        raise
 
 
 # ---------------------------------------------------------------------------

@@ -44,6 +44,14 @@ ORACLE_TABLES = [
     "oracle_scheduled_cutoffs",
     "oracle_sport_policies",
     "oracle_sport_policy_active",
+    # Inc-3+ Stage 6 (migration 010)
+    "oracle_lineup_observations",
+]
+
+# Stage 6 (migration 010) table — registered explicitly to keep the approved
+# Oracle-table registry complete (PM-1029 / PM-1031).
+STAGE6_TABLES = [
+    "oracle_lineup_observations",
 ]
 
 # Stage 5 (migration 009) tables — registered explicitly to prevent recurrence
@@ -797,3 +805,71 @@ def test_migration_009_is_rerunnable(conn):
     cur.close()
     assert policy_count == 1, "Re-running migration 009 duplicated the policy seed"
     assert active_count == 1, "Re-running migration 009 duplicated the active designation"
+
+
+# ---------------------------------------------------------------------------
+# M. Stage 6 (migration 010) — evidence-safe lineup observations
+# ---------------------------------------------------------------------------
+
+def test_migration_010_present():
+    files = _numbered_migration_files()
+    assert any(f.startswith("010_") for f in files), (
+        "Migration 010 (Stage 6 schema) is missing from database/migrations/"
+    )
+
+
+def test_stage6_table_exists(conn):
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT table_name FROM information_schema.tables
+        WHERE table_schema = 'public' AND table_name = ANY(%s)
+        """,
+        (STAGE6_TABLES,),
+    )
+    found = {row[0] for row in cur.fetchall()}
+    cur.close()
+    assert found == set(STAGE6_TABLES), f"Missing Stage 6 tables: {set(STAGE6_TABLES) - found}"
+
+
+def test_stage6_table_has_append_only_trigger(conn):
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT event_manipulation FROM information_schema.triggers
+        WHERE trigger_schema = 'public' AND event_object_table = 'oracle_lineup_observations'
+        """
+    )
+    events = {row[0] for row in cur.fetchall()}
+    cur.close()
+    assert {"UPDATE", "DELETE"} <= events, (
+        "oracle_lineup_observations missing UPDATE/DELETE append-only guard"
+    )
+
+
+def test_stage6_lineup_status_check_excludes_authoritatively_confirmed(conn):
+    """A row must not be storable with AUTHORITATIVELY_CONFIRMED lineup status."""
+    cur = conn.cursor()
+    with pytest.raises(psycopg2.errors.CheckViolation):
+        cur.execute(
+            """
+            INSERT INTO oracle_lineup_observations
+                (game_run_id, slate_run_id, snapshot_identity, observed_at, source,
+                 home_lineup, away_lineup, home_lineup_status, away_lineup_status,
+                 home_starting_pitcher, away_starting_pitcher, policy_version_id,
+                 change_detected, change_evidence)
+            VALUES ('G','S','S6O-x','2026-09-09T00:00:00+00:00','src',
+                    '[]'::jsonb,'[]'::jsonb,'AUTHORITATIVELY_CONFIRMED','OBSERVED_FULL',
+                    '{}'::jsonb,'{}'::jsonb,'MLB-A3-v1',false,'{}'::jsonb)
+            """
+        )
+    cur.close()
+
+
+def test_migration_010_is_rerunnable(conn):
+    path = os.path.join(_MIGRATIONS_DIR, "010_add_oracle_stage6_schema.sql")
+    with open(path, "r", encoding="utf-8") as fh:
+        sql = fh.read()
+    cur = conn.cursor()
+    cur.execute(sql)  # must not error on re-application
+    cur.close()

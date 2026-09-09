@@ -1541,24 +1541,56 @@ class TestStage5IntelligencePipeline:
 
 
 class TestStage6LineupMonitoring:
-    """R — Stage 6 stub: lineup_observation_recorded per game; no state change."""
+    """R — Stage 6 evidence-safe: one OBSERVED_FULL observation per game;
+    lineup_observation_recorded emitted; stays in lineup_monitoring; never emits
+    lineup_confirmed / recalculation_triggered. (Replaces retired stub coverage;
+    Inc-3+ PM-1031 under PM-1029.)"""
+
+    def _obs(self, game_id="1"):
+        from backend.oracle.mlb_adapter import LineupObservation, LINEUP_OBSERVED_FULL, PITCHER_PROBABLE
+        return LineupObservation(
+            game_id=game_id, classification=LINEUP_OBSERVED_FULL,
+            home_order=tuple(range(1, 10)), away_order=tuple(range(11, 20)),
+            home_pitcher={"id": 100, "epistemic_status": PITCHER_PROBABLE},
+            away_pitcher={"id": 200, "epistemic_status": PITCHER_PROBABLE},
+            home_lineup_status=LINEUP_OBSERVED_FULL, away_lineup_status=LINEUP_OBSERVED_FULL,
+        )
 
     def _run(self, conn=None, env=_ENABLED_ENV):
         if conn is None:
             conn = _StageConn()
-        with patch(_PATCH_RECORD_EVENT, return_value=1) as mock_re:
+        with patch("backend.oracle.orchestrator._load_active_mlb_policy", return_value=_FakePolicy()), \
+             patch("backend.oracle.orchestrator.MLBAdapter") as MockAdapter, \
+             patch(_PATCH_RECORD_EVENT, return_value=1) as mock_re:
+            MockAdapter.return_value.observe_lineup.side_effect = lambda gid: self._obs(gid)
             run_stage_6(conn, _TEST_SLATE_ID, _TEST_GAME_IDS, env=env)
         return conn, mock_re
 
-    def test_writes_lineup_observation_recorded_per_game(self):
+    def test_emits_lineup_observation_recorded_per_game(self):
         _, mock_re = self._run()
         event_types = [c[0][1] for c in mock_re.call_args_list]
         assert event_types.count("lineup_observation_recorded") == 2
 
+    def test_never_emits_confirmed_or_recalc(self):
+        _, mock_re = self._run()
+        event_types = [c[0][1] for c in mock_re.call_args_list]
+        assert "lineup_confirmed" not in event_types
+        assert "recalculation_triggered" not in event_types
+
+    def test_no_first_observation_change_event(self):
+        _, mock_re = self._run()  # mock conn has no prior observation
+        event_types = [c[0][1] for c in mock_re.call_args_list]
+        assert "lineup_change_detected" not in event_types
+
     def test_no_game_status_update(self):
         conn, _ = self._run()
-        update_cursors = [c for c in conn.cursors if any("UPDATE" in s.upper() for s in c.sql_log)]
+        update_cursors = [c for c in conn.cursors if any("UPDATE" in s.upper() and "game_status" in s.lower() for s in c.sql_log)]
         assert len(update_cursors) == 0
+
+    def test_persists_observation_row(self):
+        conn, _ = self._run()
+        all_sql = " ".join(s.lower() for c in conn.cursors for s in c.sql_log)
+        assert "oracle_lineup_observations" in all_sql
 
     def test_commits_exactly_once(self):
         conn, _ = self._run()
