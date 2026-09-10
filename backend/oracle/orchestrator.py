@@ -51,6 +51,7 @@ from backend.oracle.stage6_lineup import (
     compute_snapshot_identity,
     detect_material_change,
 )
+from backend.oracle import stage7_final_analysis as s7
 from backend.oracle.state_machines import (
     transition_game_state,
     transition_slate_state,
@@ -1057,33 +1058,414 @@ def run_stage_6(
 
 
 # ---------------------------------------------------------------------------
-# Stage 7 — Final Analysis stub
+# Stage 7 — Final Analysis (Option A finalization; PM-1047 / PM-1049 / PM-1051)
 # ---------------------------------------------------------------------------
+
+class Stage7FinalizationError(OrchestratorError):
+    """Raised when a Stage 7 uniqueness conflict cannot be reconciled to a committed
+    frozen record (data-integrity conflict → rollback)."""
+
+
+_PG_UNIQUE_VIOLATION = "23505"
+
+
+def _fetch_game_status(conn: object, game_run_id: str):
+    """Return the actual persisted game_status for game_run_id, or None."""
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "SELECT game_status FROM oracle_game_analyses WHERE game_run_id = %s",
+            (game_run_id,),
+        )
+        row = cur.fetchone()
+    finally:
+        cur.close()
+    return row[0] if row is not None else None
+
+
+def _fetch_latest_stage5_result(conn: object, game_run_id: str):
+    """Return (stage5_result_id, data_version_id, verdict) for the latest Stage 5 result,
+    or None. The scalar verdict is copied verbatim; engine_outputs are never re-serialized
+    (analytical values are bound by the immutable source identity)."""
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT stage5_result_id, data_version_id, verdict
+            FROM oracle_stage5_results
+            WHERE game_run_id = %s
+            ORDER BY computed_at DESC
+            LIMIT 1
+            """,
+            (game_run_id,),
+        )
+        return cur.fetchone()
+    finally:
+        cur.close()
+
+
+def _fetch_latest_canonical_observation(conn: object, game_run_id: str):
+    """Return (snapshot_identity, observed_at) for the latest canonical OBSERVED_FULL
+    observation, or None. Stage 7 binds persisted canonical observations only; it makes no
+    claim about later non-persistent (UNAVAILABLE/PARTIAL) attempts it has not read."""
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT snapshot_identity, observed_at
+            FROM oracle_lineup_observations
+            WHERE game_run_id = %s
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (game_run_id,),
+        )
+        return cur.fetchone()
+    finally:
+        cur.close()
+
+
+def _fetch_stage7_final(conn: object, game_run_id: str):
+    """Return the frozen final record's bound fields, or None:
+    (bound_input_identity, stage5_result_id, data_version_id, policy_version_id,
+     scheduled_cutoff_at, stage6_snapshot_identity, verdict)."""
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT bound_input_identity, stage5_result_id, data_version_id,
+                   policy_version_id, scheduled_cutoff_at, stage6_snapshot_identity, verdict
+            FROM oracle_stage7_final_analysis
+            WHERE game_run_id = %s
+            """,
+            (game_run_id,),
+        )
+        return cur.fetchone()
+    finally:
+        cur.close()
+
+
+def _insert_stage7_final(
+    conn: object, game_run_id: str, slate_run_id: str, stage5_result_id: str,
+    data_version_id: str, policy_version_id: str, verdict: str,
+    scheduled_cutoff_at: object, stage6_snapshot_identity: str, stage6_observed_at: object,
+    cutoff_rel: str | None, bound_input_identity: str, limitations: list, assessment_at: object,
+) -> None:
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            INSERT INTO oracle_stage7_final_analysis
+                (game_run_id, slate_run_id, stage5_result_id, data_version_id,
+                 policy_version_id, verdict, scheduled_cutoff_at, stage6_snapshot_identity,
+                 stage6_observed_at, cutoff_relationship, bound_input_identity,
+                 limitations, assessment_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            (game_run_id, slate_run_id, stage5_result_id, data_version_id,
+             policy_version_id, verdict, scheduled_cutoff_at, stage6_snapshot_identity,
+             stage6_observed_at, cutoff_rel, bound_input_identity,
+             json.dumps(limitations), assessment_at),
+        )
+    finally:
+        cur.close()
+
+
+def _has_stage7_divergence_audit(conn: object, game_run_id: str, bound_input_identity: str) -> bool:
+    """True iff a divergence audit row already records this (game, current identity),
+    enabling deduplicated divergence reporting."""
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT 1 FROM oracle_lifecycle_audit
+            WHERE game_run_id = %s AND stage = '7'
+              AND event = 'stage7_provenance_divergence'
+              AND detail LIKE %s
+            LIMIT 1
+            """,
+            (game_run_id, f"%{bound_input_identity}%"),
+        )
+        return cur.fetchone() is not None
+    finally:
+        cur.close()
+
+
+def _acquire_divergence_lock(conn: object, game_run_id: str, bound_input_identity: str) -> None:
+    """Serialize the divergence-audit check-then-insert across independent connections/
+    transactions using a PostgreSQL transaction-scoped advisory lock, keyed on
+    (game_run_id, current bound-input identity) and released automatically at commit/rollback.
+
+    The lock is acquired BEFORE the deduplication SELECT; if a concurrent transaction holds it,
+    this call waits until that transaction commits or rolls back. The caller then re-reads
+    (_has_stage7_divergence_audit) under READ COMMITTED, so a row the other transaction committed
+    is seen and the duplicate insert is skipped. This makes deduplication safe process-wide, not
+    only within one Python process. It uses no shared audit-schema, state-machine, or unrelated
+    writer changes.
+    """
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "SELECT pg_advisory_xact_lock(hashtext(%s)::bigint)",
+            (f"stage7_divergence:{game_run_id}:{bound_input_identity}",),
+        )
+        cur.fetchone()
+    finally:
+        cur.close()
+
+
+def _reconcile_existing_final(conn, slate_run_id, game_run_id, frozen, stage5, cutoff, observation):
+    """Classify a re-invocation against an existing frozen final record.
+
+    Returns (Stage7FinalResult, wrote). The current bound-input identity is recomputed only
+    from sufficiently-available valid inputs; missing comparison inputs yield
+    UNAVAILABLE_INPUTS (never a false replay/divergence) and preserve the frozen record.
+    A uniqueness violation is never equated with success. CHANGED_PROVENANCE appends exactly
+    one deduplicated divergence audit row and never rewrites the frozen record.
+    """
+    (stored_identity, s_s5id, s_dv, s_policy, s_cutoff, s_snapshot, s_verdict) = frozen
+
+    if stage5 is None or cutoff is None:
+        return (
+            s7.Stage7FinalResult(
+                game_run_id=game_run_id, outcome=s7.UNAVAILABLE_INPUTS,
+                reason=s7.REASON_UNREADABLE_COMPARISON_INPUTS,
+                bound_input_identity=stored_identity, verdict=s_verdict,
+                stage6_snapshot_identity=s_snapshot,
+                limitations=s7.standing_limitations(),
+            ),
+            False,
+        )
+
+    # A missing or unusable current canonical observation must NOT be hashed as None (that
+    # would falsely report CHANGED_PROVENANCE). Return UNAVAILABLE_INPUTS, preserve the frozen
+    # record, and emit no divergence audit. (snapshot_identity is NOT NULL when a row exists.)
+    if observation is None or observation[0] is None:
+        return (
+            s7.Stage7FinalResult(
+                game_run_id=game_run_id, outcome=s7.UNAVAILABLE_INPUTS,
+                reason=s7.REASON_NO_CANONICAL_OBSERVATION,
+                bound_input_identity=stored_identity, verdict=s_verdict,
+                stage6_snapshot_identity=s_snapshot,
+                limitations=s7.standing_limitations(),
+            ),
+            False,
+        )
+
+    stage5_result_id, data_version_id, _verdict = stage5
+    _cutoff_slate, scheduled_cutoff_at, policy_version_id = cutoff
+    snapshot_identity = observation[0]
+
+    current = s7.bound_inputs(
+        stage5_result_id, data_version_id, policy_version_id,
+        scheduled_cutoff_at, snapshot_identity,
+    )
+    current_identity = s7.compute_bound_input_identity(game_run_id, current)
+
+    if current_identity == stored_identity:
+        return (
+            s7.Stage7FinalResult(
+                game_run_id=game_run_id, outcome=s7.EXACT_REPLAY,
+                bound_input_identity=stored_identity, stage5_result_id=s_s5id,
+                verdict=s_verdict, stage6_snapshot_identity=s_snapshot,
+                limitations=s7.standing_limitations(),
+            ),
+            False,
+        )
+
+    stored = s7.bound_inputs(s_s5id, s_dv, s_policy, s_cutoff, s_snapshot)
+    differing = s7.differing_bound_inputs(current, stored)
+
+    # Serialize the check-then-insert across independent connections, then re-read after any
+    # wait (READ COMMITTED) before inserting, so exactly one matching audit row is written.
+    _acquire_divergence_lock(conn, game_run_id, current_identity)
+    wrote = False
+    if not _has_stage7_divergence_audit(conn, game_run_id, current_identity):
+        _insert_lifecycle_audit(
+            conn, game_run_id=game_run_id, slate_run_id=slate_run_id,
+            stage="7", event="stage7_provenance_divergence",
+            detail=f"frozen_identity={stored_identity} current_identity={current_identity} "
+                   f"differing={','.join(differing)}",
+        )
+        wrote = True
+    return (
+        s7.Stage7FinalResult(
+            game_run_id=game_run_id, outcome=s7.CHANGED_PROVENANCE,
+            bound_input_identity=stored_identity, stage5_result_id=s_s5id,
+            verdict=s_verdict, stage6_snapshot_identity=s_snapshot,
+            differing_inputs=differing, limitations=s7.standing_limitations(),
+        ),
+        wrote,
+    )
+
 
 def run_stage_7(
     conn: object,
     slate_run_id: str,
     game_run_ids: list[str],
     env: dict | None = None,
-) -> None:
-    """Stage 7 stub — Final Analysis and Recalculation (deferred to Phase 3).
+) -> list[s7.Stage7FinalResult]:
+    """Stage 7 — Final Analysis (Option A; PM-1047 / PM-1049 / PM-1051).
 
-    Writes recalculation_triggered per game as stub placeholder.
-    Transitions each game: lineup_monitoring → final_analysis.
+    Finalizes the immutable Stage 5 scalar verdict with Stage 6 observation provenance: no
+    lineup-adjusted calculation, no confidence increase; pitchers remain PROBABLE. "Final"
+    does NOT establish official lineup confirmation, analytical freshness, or betting
+    readiness. Emits NO event (immutable frozen record + lifecycle audit only; the event
+    registry is unchanged).
+
+    Per game, kill switch first, then the existing frozen final record is checked BEFORE
+    first-finalization eligibility. If a frozen record exists, the bound-input identity is
+    recomputed from currently-available valid inputs → EXACT_REPLAY (equal) or
+    CHANGED_PROVENANCE (differs; one deduplicated divergence audit row); unreadable
+    comparison inputs → UNAVAILABLE_INPUTS with the frozen record preserved. Otherwise
+    first-finalization eligibility applies: actual game_status == 'lineup_monitoring'
+    (else INELIGIBLE); Stage 5 result + scheduled cutoff readable and a canonical
+    OBSERVED_FULL snapshot with a valid, non-future timezone-aware observed_at (else
+    UNAVAILABLE_INPUTS). When eligible, one immutable final record is frozen, a lifecycle
+    audit row written, and the game transitioned lineup_monitoring → final_analysis.
+
+    One Orchestrator-owned transaction (DCR-W5-001): write outcomes commit once at the end
+    and are returned only after commit; read-only invocations perform no commit. A
+    uniqueness conflict on insert is recovered via ROLLBACK TO SAVEPOINT and reconciled by
+    identity. Any failure rolls the whole stage back and raises.
     """
     _check_kill_switch(env=env)
-    logger.info("Stage 7 stub: final analysis/recalculation deferred to Phase 3")
 
     now = _now_utc()
-    for game_run_id in game_run_ids:
-        record_event(
-            conn, "recalculation_triggered", slate_run_id, now,
-            game_run_id=game_run_id,
-        )
-        transition_game_state("lineup_monitoring", "final_analysis")
-        _update_game_status(conn, game_run_id, "final_analysis")
+    results: list[s7.Stage7FinalResult] = []
+    wrote = False
 
-    conn.commit()
+    try:
+        for game_run_id in game_run_ids:
+            frozen = _fetch_stage7_final(conn, game_run_id)
+            stage5 = _fetch_latest_stage5_result(conn, game_run_id)
+            cutoff = _fetch_scheduled_cutoff(conn, game_run_id)
+            observation = _fetch_latest_canonical_observation(conn, game_run_id)
+
+            # Frozen-record precedence: replay/divergence never re-applies first-
+            # finalization state/temporal eligibility (the game already advanced).
+            if frozen is not None:
+                result, did_write = _reconcile_existing_final(
+                    conn, slate_run_id, game_run_id, frozen, stage5, cutoff, observation,
+                )
+                wrote = wrote or did_write
+                results.append(result)
+                continue
+
+            status = _fetch_game_status(conn, game_run_id)
+            if status != "lineup_monitoring":
+                results.append(s7.Stage7FinalResult(
+                    game_run_id=game_run_id, outcome=s7.INELIGIBLE,
+                    reason=s7.REASON_NOT_IN_LINEUP_MONITORING,
+                ))
+                continue
+            if stage5 is None:
+                results.append(s7.Stage7FinalResult(
+                    game_run_id=game_run_id, outcome=s7.UNAVAILABLE_INPUTS,
+                    reason=s7.REASON_NO_STAGE5_RESULT,
+                ))
+                continue
+            if cutoff is None:
+                results.append(s7.Stage7FinalResult(
+                    game_run_id=game_run_id, outcome=s7.UNAVAILABLE_INPUTS,
+                    reason=s7.REASON_NO_SCHEDULED_CUTOFF,
+                ))
+                continue
+            if observation is None:
+                results.append(s7.Stage7FinalResult(
+                    game_run_id=game_run_id, outcome=s7.UNAVAILABLE_INPUTS,
+                    reason=s7.REASON_NO_CANONICAL_OBSERVATION,
+                ))
+                continue
+
+            stage5_result_id, data_version_id, verdict = stage5
+            _cutoff_slate, scheduled_cutoff_at, policy_version_id = cutoff
+            snapshot_identity, observed_at = observation
+
+            if not s7.is_timezone_aware(observed_at):
+                results.append(s7.Stage7FinalResult(
+                    game_run_id=game_run_id, outcome=s7.UNAVAILABLE_INPUTS,
+                    reason=s7.REASON_INVALID_OBSERVATION_TIMESTAMP,
+                ))
+                continue
+            if not s7.is_valid_non_future_observed_at(observed_at, now):
+                results.append(s7.Stage7FinalResult(
+                    game_run_id=game_run_id, outcome=s7.UNAVAILABLE_INPUTS,
+                    reason=s7.REASON_FUTURE_OBSERVATION_TIMESTAMP,
+                ))
+                continue
+
+            inputs = s7.bound_inputs(
+                stage5_result_id, data_version_id, policy_version_id,
+                scheduled_cutoff_at, snapshot_identity,
+            )
+            identity = s7.compute_bound_input_identity(game_run_id, inputs)
+            cutoff_rel = s7.cutoff_relationship(observed_at, scheduled_cutoff_at)
+            limitations = list(s7.standing_limitations())
+
+            cur = conn.cursor()
+            try:
+                cur.execute("SAVEPOINT sp_stage7_final")
+            finally:
+                cur.close()
+            try:
+                _insert_stage7_final(
+                    conn, game_run_id, slate_run_id, stage5_result_id, data_version_id,
+                    policy_version_id, verdict, scheduled_cutoff_at, snapshot_identity,
+                    observed_at, cutoff_rel, identity, limitations, now,
+                )
+            except Exception as exc:  # inspect SQLSTATE; re-raise anything but a uniqueness conflict
+                if getattr(exc, "pgcode", None) != _PG_UNIQUE_VIOLATION:
+                    raise
+                cur = conn.cursor()
+                try:
+                    cur.execute("ROLLBACK TO SAVEPOINT sp_stage7_final")
+                finally:
+                    cur.close()
+                frozen_now = _fetch_stage7_final(conn, game_run_id)
+                if frozen_now is None:
+                    raise Stage7FinalizationError(
+                        f"uniqueness conflict for {game_run_id} with no committed frozen record"
+                    )
+                result, did_write = _reconcile_existing_final(
+                    conn, slate_run_id, game_run_id, frozen_now, stage5, cutoff, observation,
+                )
+                wrote = wrote or did_write
+                results.append(result)
+                continue
+            else:
+                cur = conn.cursor()
+                try:
+                    cur.execute("RELEASE SAVEPOINT sp_stage7_final")
+                finally:
+                    cur.close()
+
+            _insert_lifecycle_audit(
+                conn, game_run_id=game_run_id, slate_run_id=slate_run_id,
+                stage="7", event="stage7_final_analysis_recorded",
+                detail=f"bound_input_identity={identity} stage5_result_id={stage5_result_id} "
+                       f"cutoff_relationship={cutoff_rel}",
+            )
+            transition_game_state("lineup_monitoring", "final_analysis")
+            _update_game_status(conn, game_run_id, "final_analysis")
+            wrote = True
+            results.append(s7.Stage7FinalResult(
+                game_run_id=game_run_id, outcome=s7.FIRST_FINALIZATION,
+                bound_input_identity=identity, stage5_result_id=stage5_result_id,
+                verdict=verdict, stage6_snapshot_identity=snapshot_identity,
+                cutoff_relationship=cutoff_rel, limitations=tuple(limitations),
+            ))
+            logger.info(
+                "Stage 7: finalized game_run_id=%s stage5_result_id=%s identity=%s",
+                game_run_id, stage5_result_id, identity,
+            )
+
+        if wrote:
+            conn.commit()
+        return results
+    except Exception:
+        conn.rollback()
+        raise
 
 
 # ---------------------------------------------------------------------------

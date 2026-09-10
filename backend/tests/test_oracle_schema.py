@@ -46,12 +46,20 @@ ORACLE_TABLES = [
     "oracle_sport_policy_active",
     # Inc-3+ Stage 6 (migration 010)
     "oracle_lineup_observations",
+    # Stage 7 (migration 011)
+    "oracle_stage7_final_analysis",
 ]
 
 # Stage 6 (migration 010) table — registered explicitly to keep the approved
 # Oracle-table registry complete (PM-1029 / PM-1031).
 STAGE6_TABLES = [
     "oracle_lineup_observations",
+]
+
+# Stage 7 (migration 011) table — registered explicitly to keep the approved Oracle-table
+# registry complete (PM-1047 / PM-1049 / PM-1051).
+STAGE7_TABLES = [
+    "oracle_stage7_final_analysis",
 ]
 
 # Stage 5 (migration 009) tables — registered explicitly to prevent recurrence
@@ -868,6 +876,64 @@ def test_stage6_lineup_status_check_excludes_authoritatively_confirmed(conn):
 
 def test_migration_010_is_rerunnable(conn):
     path = os.path.join(_MIGRATIONS_DIR, "010_add_oracle_stage6_schema.sql")
+    with open(path, "r", encoding="utf-8") as fh:
+        sql = fh.read()
+    cur = conn.cursor()
+    cur.execute(sql)  # must not error on re-application
+    cur.close()
+
+
+def test_stage7_table_exists(conn):
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT table_name FROM information_schema.tables
+        WHERE table_schema = 'public' AND table_name = ANY(%s)
+        """,
+        (STAGE7_TABLES,),
+    )
+    found = {row[0] for row in cur.fetchall()}
+    cur.close()
+    assert found == set(STAGE7_TABLES), f"Missing Stage 7 tables: {set(STAGE7_TABLES) - found}"
+
+
+def test_stage7_table_has_append_only_trigger(conn):
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT event_manipulation FROM information_schema.triggers
+        WHERE trigger_schema = 'public' AND event_object_table = 'oracle_stage7_final_analysis'
+        """
+    )
+    events = {row[0] for row in cur.fetchall()}
+    cur.close()
+    assert {"UPDATE", "DELETE"} <= events, (
+        "oracle_stage7_final_analysis missing UPDATE/DELETE append-only guard"
+    )
+
+
+def test_stage7_table_has_unique_game_run_id(conn):
+    """One frozen final per game: game_run_id must be UNIQUE (PM-1049 concurrency guard)."""
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT COUNT(*) FROM information_schema.table_constraints tc
+        JOIN information_schema.key_column_usage kcu
+          ON tc.constraint_name = kcu.constraint_name
+         AND tc.table_schema = kcu.table_schema
+        WHERE tc.table_schema = 'public'
+          AND tc.table_name = 'oracle_stage7_final_analysis'
+          AND tc.constraint_type = 'UNIQUE'
+          AND kcu.column_name = 'game_run_id'
+        """
+    )
+    count = cur.fetchone()[0]
+    cur.close()
+    assert count == 1, "oracle_stage7_final_analysis must have a UNIQUE(game_run_id) constraint"
+
+
+def test_migration_011_is_rerunnable(conn):
+    path = os.path.join(_MIGRATIONS_DIR, "011_add_oracle_stage7_final_analysis.sql")
     with open(path, "r", encoding="utf-8") as fh:
         sql = fh.read()
     cur = conn.cursor()

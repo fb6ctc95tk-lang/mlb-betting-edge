@@ -1598,33 +1598,40 @@ class TestStage6LineupMonitoring:
 
 
 class TestStage7FinalAnalysis:
-    """R — Stage 7 stub: recalculation_triggered per game; game→final_analysis."""
+    """R — Stage 7 finalization (Option A; PM-1047/PM-1049/PM-1051): emits NO event, and
+    read-only outcomes make no writes. With the pristine mock connection every fetch returns
+    None, so each game is INELIGIBLE (actual status is not lineup_monitoring). Full
+    behavioural coverage (first finalization / replay / changed provenance / temporal /
+    concurrency / rollback / immutability) is DB-backed in test_stage7.py."""
 
     def _run(self, conn=None, env=_ENABLED_ENV):
         if conn is None:
             conn = _StageConn()
         with patch(_PATCH_RECORD_EVENT, return_value=1) as mock_re:
-            run_stage_7(conn, _TEST_SLATE_ID, _TEST_GAME_IDS, env=env)
-        return conn, mock_re
+            results = run_stage_7(conn, _TEST_SLATE_ID, _TEST_GAME_IDS, env=env)
+        return conn, mock_re, results
 
-    def test_writes_recalculation_triggered_per_game(self):
-        _, mock_re = self._run()
-        event_types = [c[0][1] for c in mock_re.call_args_list]
-        assert event_types.count("recalculation_triggered") == 2
+    def test_emits_no_event(self):
+        _, mock_re, _ = self._run()
+        assert mock_re.call_count == 0
 
-    def test_updates_game_status_to_final_analysis(self):
-        conn, _ = self._run()
-        update_cursors = [c for c in conn.cursors if any("UPDATE" in s.upper() and "oracle_game_analyses" in s.lower() for s in c.sql_log)]
-        for c in update_cursors:
-            assert "final_analysis" in c.params_log[0]
+    def test_returns_one_result_per_game(self):
+        _, _, results = self._run()
+        assert len(results) == len(_TEST_GAME_IDS)
 
-    def test_commits_exactly_once(self):
-        conn, _ = self._run()
-        assert conn.commit_count == 1
+    def test_ineligible_when_not_in_lineup_monitoring(self):
+        _, _, results = self._run()
+        assert all(r.outcome == "INELIGIBLE" for r in results)
+        assert all(r.reason == "not_in_lineup_monitoring" for r in results)
 
-    def test_does_not_rollback(self):
-        conn, _ = self._run()
-        assert not conn.rollback_called
+    def test_read_only_outcome_makes_no_commit_or_rollback(self):
+        conn, _, _ = self._run()
+        assert conn.commit_count == 0
+        assert conn.rollback_count == 0
+
+    def test_all_cursors_closed(self):
+        conn, _, _ = self._run()
+        assert all(c.closed for c in conn.cursors)
 
 
 class TestStage8ActivationWindow:
