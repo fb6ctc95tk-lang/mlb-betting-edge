@@ -899,6 +899,12 @@ _requires_db = pytest.mark.skipif(
 _ENABLED_ENV = {"ORACLE_AUTONOMOUS_RUN_ENABLED": "true"}
 _DISABLED_ENV: dict = {}
 _TEST_DATE = date(2026, 7, 25)
+# Stage 8 (PM-1067/1069/1071) enforces a strict decision_time < scheduled_cutoff_at gate. The
+# Phase-1 fixtures use fixed past first-pitch dates (2026-07-25T17:10Z / 22:10Z → cutoffs
+# 16:55Z / 21:55Z at the MLB-A3-v1 −900s offset), so the end-to-end pipeline is now time-
+# sensitive. This deterministic instant is BEFORE every fixture cutoff, so the window opens and
+# the slate settles; it controls time without weakening any assertion.
+_PIPELINE_CLOCK = datetime(2026, 7, 25, 12, 0, tzinfo=timezone.utc)
 _TEST_SLATE_ID = "ORACLE-20260725-001"
 _TEST_GAME_IDS = [
     "ORACLE-20260725-001-BOS-NYY-746484",
@@ -1635,39 +1641,47 @@ class TestStage7FinalAnalysis:
 
 
 class TestStage8ActivationWindow:
-    """R — Stage 8 stub: candidate_created per game; game→activation_eligible; slate→activation_window_open."""
+    """R — Stage 8 activation window (C1 FULL; PM-1067 / PM-1069 / PM-1071).
+
+    These mock-only tests assert the event-free invariant (C3) and no-false-write behaviour.
+    Under the _StageConn mock the slate row is absent (fetchone → None), so no game is admitted;
+    full contract behaviour (WINDOW_OPENED / EXACT_REPLAY / CHANGED_PROVENANCE, the strict cutoff
+    gate, slate-lock contention, later admission, advanced-state rejection, defensive uniqueness
+    recovery) is covered against a real PostgreSQL database in test_stage8.py."""
 
     def _run(self, conn=None, env=_ENABLED_ENV):
         if conn is None:
             conn = _StageConn()
         with patch(_PATCH_RECORD_EVENT, return_value=1) as mock_re:
-            run_stage_8(conn, _TEST_SLATE_ID, _TEST_GAME_IDS, env=env)
-        return conn, mock_re
+            results = run_stage_8(conn, _TEST_SLATE_ID, _TEST_GAME_IDS, env=env)
+        return conn, mock_re, results
 
-    def test_writes_candidate_created_per_game(self):
-        _, mock_re = self._run()
-        event_types = [c[0][1] for c in mock_re.call_args_list]
-        assert event_types.count("candidate_created") == 2
+    def test_event_free_no_event_emitted(self):
+        # C3 EVENT-FREE: Stage 8 emits no event at all (in particular no candidate_created).
+        _, mock_re, _ = self._run()
+        mock_re.assert_not_called()
 
-    def test_updates_game_status_to_activation_eligible(self):
-        conn, _ = self._run()
-        game_updates = [c for c in conn.cursors if any("UPDATE" in s.upper() and "oracle_game_analyses" in s.lower() for s in c.sql_log)]
-        for c in game_updates:
-            assert "activation_eligible" in c.params_log[0]
-
-    def test_updates_slate_status_to_activation_window_open(self):
-        conn, _ = self._run()
-        slate_updates = [c for c in conn.cursors if any("UPDATE" in s.upper() and "oracle_slate_runs" in s.lower() for s in c.sql_log)]
-        assert len(slate_updates) == 1
-        assert "activation_window_open" in slate_updates[0].params_log[0]
-
-    def test_commits_exactly_once(self):
-        conn, _ = self._run()
-        assert conn.commit_count == 1
-
-    def test_does_not_rollback(self):
-        conn, _ = self._run()
+    def test_no_false_write_when_slate_not_admitting(self):
+        # Under the mock (slate row absent), no game is admitted: no commit and no rollback.
+        conn, _, _ = self._run()
+        assert conn.commit_count == 0
         assert not conn.rollback_called
+
+    def test_returns_one_ineligible_result_per_game_under_mock(self):
+        # Under the mock every fetch returns None, so persisted game membership is absent →
+        # the membership guard (PM-1075) rejects each game before any write.
+        _, _, results = self._run()
+        assert [r.game_run_id for r in results] == _TEST_GAME_IDS
+        assert all(r.outcome == "INELIGIBLE" for r in results)
+        assert all(r.reason == "not_in_slate" for r in results)
+
+    def test_no_game_status_update_when_not_admitting(self):
+        conn, _, _ = self._run()
+        game_updates = [
+            c for c in conn.cursors
+            if any("UPDATE" in s.upper() and "oracle_game_analyses" in s.lower() for s in c.sql_log)
+        ]
+        assert game_updates == []
 
 
 class TestStage9PregameLock:
@@ -1958,6 +1972,18 @@ class TestIntegrationFullPhase1Run:
     """V — End-to-end Phase 1 run against a real PostgreSQL schema."""
 
     @pytest.fixture(autouse=True)
+    def _fixed_pipeline_clock(self):
+        """Pin the Orchestrator clock to a deterministic instant before every fixture cutoff.
+
+        Stage 8 now applies a strict decision_time < scheduled_cutoff_at gate (PM-1067/1069/1071);
+        with the fixed past-dated Phase-1 fixtures the pipeline would otherwise be unable to open
+        the activation window at real wall-clock time. This controls time only; every assertion
+        (slate/game reach 'settled', event counts) is unchanged and not weakened.
+        """
+        with patch("backend.oracle.orchestrator._now_utc", return_value=_PIPELINE_CLOCK):
+            yield
+
+    @pytest.fixture(autouse=True)
     def db_conn(self):
         """Open connection, yield, then delete all test records and close."""
         import psycopg2
@@ -1970,6 +1996,15 @@ class TestIntegrationFullPhase1Run:
             cur.execute("TRUNCATE oracle_play_events")
             cur.execute("TRUNCATE oracle_preliminary_data")
             cur.execute("TRUNCATE oracle_lifecycle_audit")
+            # Per-run Oracle result tables must be cleared for test isolation. Stage 8 now applies
+            # a deterministic clock (see _fixed_pipeline_clock), so clock-derived ids (e.g.
+            # oracle_ecf_results.ecf_result_id) are identical across runs and would otherwise
+            # collide on re-run. TRUNCATE bypasses the append-only row triggers (UPDATE/DELETE only).
+            cur.execute(
+                "TRUNCATE oracle_ecf_results, oracle_stage5_results, oracle_preliminary_outputs, "
+                "oracle_scheduled_cutoffs, oracle_lineup_observations, "
+                "oracle_stage7_final_analysis, oracle_stage8_activation_window"
+            )
             cur.execute("DELETE FROM oracle_game_analyses WHERE slate_run_id LIKE 'ORACLE-20260725-%'")
             cur.execute("DELETE FROM oracle_slate_runs WHERE slate_run_id LIKE 'ORACLE-20260725-%'")
         finally:
