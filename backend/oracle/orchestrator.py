@@ -53,6 +53,7 @@ from backend.oracle.stage6_lineup import (
 )
 from backend.oracle import stage7_final_analysis as s7
 from backend.oracle import stage8_activation as s8
+from backend.oracle import stage9_pregame_lock as s9
 from backend.oracle.state_machines import (
     transition_game_state,
     transition_slate_state,
@@ -1482,6 +1483,11 @@ class Stage8ActivationError(OrchestratorError):
 _STAGE8_ADMITTING_SLATE_STATES = ("analysis_in_progress", "activation_window_open")
 
 
+class Stage9LockError(OrchestratorError):
+    """Raised when a Stage 9 uniqueness conflict cannot be reconciled to a committed
+    pregame-lock record (data-integrity conflict → rollback)."""
+
+
 def _lock_slate_for_update(conn: object, slate_run_id: str):
     """Acquire the slate-row lock and reread persisted slate state in one step.
 
@@ -1861,37 +1867,415 @@ def run_stage_8(
 
 
 # ---------------------------------------------------------------------------
-# Stage 9 — Pregame Lock stub
+# Stage 9 — Pregame Lock (FULL immutable per-game lock; PM-1089/1091/1092)
 # ---------------------------------------------------------------------------
+
+def _fetch_stage9_lock(conn: object, game_run_id: str):
+    """Return the existing pregame-lock row's bound fields, or None:
+    (lock_identity, activation_identity, stage7_bound_input_identity,
+     scheduled_cutoff_at, cutoff_relationship)."""
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT lock_identity, activation_identity, stage7_bound_input_identity,
+                   scheduled_cutoff_at, cutoff_relationship
+            FROM oracle_stage9_pregame_lock
+            WHERE game_run_id = %s
+            """,
+            (game_run_id,),
+        )
+        return cur.fetchone()
+    finally:
+        cur.close()
+
+
+def _insert_stage9_lock(
+    conn: object, game_run_id: str, slate_run_id: str, activation_identity: str,
+    stage7_bound_input_identity: str, lock_identity: str, scheduled_cutoff_at: object,
+    cutoff_rel: str | None, limitations: list, decision_at: object,
+) -> None:
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            INSERT INTO oracle_stage9_pregame_lock
+                (game_run_id, slate_run_id, activation_identity, stage7_bound_input_identity,
+                 lock_identity, scheduled_cutoff_at, cutoff_relationship, limitations, decision_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            (game_run_id, slate_run_id, activation_identity, stage7_bound_input_identity,
+             lock_identity, scheduled_cutoff_at, cutoff_rel, json.dumps(limitations), decision_at),
+        )
+    finally:
+        cur.close()
+
+
+def _has_stage9_divergence_audit(conn: object, game_run_id: str, lock_identity: str) -> bool:
+    """True iff a divergence audit row already records this (game, current lock identity),
+    enabling deduplicated divergence reporting."""
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT 1 FROM oracle_lifecycle_audit
+            WHERE game_run_id = %s AND stage = '9'
+              AND event = 'stage9_pregame_lock_divergence'
+              AND detail LIKE %s
+            LIMIT 1
+            """,
+            (game_run_id, f"%{lock_identity}%"),
+        )
+        return cur.fetchone() is not None
+    finally:
+        cur.close()
+
+
+def _acquire_stage9_divergence_lock(conn: object, game_run_id: str, lock_identity: str) -> None:
+    """Serialize the divergence-audit check-then-insert across independent connections using a
+    transaction-scoped advisory lock, keyed on (game_run_id, current lock identity) and released
+    automatically at commit/rollback (mirrors Stage 8). Acquired BEFORE the dedup SELECT; the
+    caller re-reads under READ COMMITTED after any wait, so a row the other transaction committed
+    is seen and the duplicate insert is skipped."""
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "SELECT pg_advisory_xact_lock(hashtext(%s)::bigint)",
+            (f"stage9_divergence:{game_run_id}:{lock_identity}",),
+        )
+        cur.fetchone()
+    finally:
+        cur.close()
+
+
+def _all_admissions_locked(conn: object, slate_run_id: str) -> bool:
+    """True iff the slate has at least one Stage-8 admission and EVERY admitted game has a
+    committed Stage-9 pregame lock (aggregate completion; PM-1088 all-admission check).
+
+    Same-transaction inserts are visible on this connection, so a lock written earlier in this
+    invocation counts toward completion."""
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "SELECT COUNT(*) FROM oracle_stage8_activation_window WHERE slate_run_id = %s",
+            (slate_run_id,),
+        )
+        admitted = cur.fetchone()[0]
+        cur.execute(
+            """
+            SELECT COUNT(*) FROM oracle_stage8_activation_window a
+            WHERE a.slate_run_id = %s
+              AND NOT EXISTS (
+                  SELECT 1 FROM oracle_stage9_pregame_lock l
+                  WHERE l.game_run_id = a.game_run_id
+              )
+            """,
+            (slate_run_id,),
+        )
+        unlocked = cur.fetchone()[0]
+    finally:
+        cur.close()
+    return admitted > 0 and unlocked == 0
+
+
+def _reconcile_existing_stage9_lock(conn, slate_run_id, game_run_id, existing, admission):
+    """Classify a re-invocation against an existing pregame-lock row (truthful replay).
+
+    Returns (Stage9LockResult, wrote). Reconciliation is historical and NEVER re-gates the cutoff
+    (the game was already locked). Identity comparison is against the CURRENT frozen Stage-8
+    admission provenance (activation identity + frozen Stage-7 identity); because those records are
+    immutable, time passing alone yields EXACT_REPLAY, not CHANGED_PROVENANCE. An unreadable
+    admission yields UNAVAILABLE_INPUTS and preserves the lock (no false replay/divergence).
+    CHANGED_PROVENANCE appends exactly one deduplicated divergence audit row."""
+    (stored_lock_identity, stored_activation_identity, stored_stage7_identity,
+     _stored_cutoff, stored_cutoff_rel) = existing
+
+    if admission is None:
+        return (
+            s9.Stage9LockResult(
+                game_run_id=game_run_id, outcome=s9.UNAVAILABLE_INPUTS,
+                reason=s9.REASON_UNREADABLE_COMPARISON_INPUTS,
+                lock_identity=stored_lock_identity,
+                activation_identity=stored_activation_identity,
+                stage7_bound_input_identity=stored_stage7_identity,
+                cutoff_relationship=stored_cutoff_rel,
+                limitations=s9.standing_limitations(),
+            ),
+            False,
+        )
+
+    current_activation_identity = admission[0]
+    current_stage7_identity = admission[1]
+
+    if (current_activation_identity == stored_activation_identity
+            and current_stage7_identity == stored_stage7_identity):
+        return (
+            s9.Stage9LockResult(
+                game_run_id=game_run_id, outcome=s9.EXACT_REPLAY,
+                lock_identity=stored_lock_identity,
+                activation_identity=stored_activation_identity,
+                stage7_bound_input_identity=stored_stage7_identity,
+                cutoff_relationship=stored_cutoff_rel,
+                limitations=s9.standing_limitations(),
+            ),
+            False,
+        )
+
+    # Defensive divergence path: the frozen admission provenance differs from the locked one.
+    current_lock_identity = s9.compute_lock_identity(
+        game_run_id, current_activation_identity, current_stage7_identity,
+    )
+    _acquire_stage9_divergence_lock(conn, game_run_id, current_lock_identity)
+    wrote = False
+    if not _has_stage9_divergence_audit(conn, game_run_id, current_lock_identity):
+        _insert_lifecycle_audit(
+            conn, game_run_id=game_run_id, slate_run_id=slate_run_id,
+            stage="9", event="stage9_pregame_lock_divergence",
+            detail=f"stored_activation_identity={stored_activation_identity} "
+                   f"current_activation_identity={current_activation_identity} "
+                   f"stored_stage7_identity={stored_stage7_identity} "
+                   f"current_stage7_identity={current_stage7_identity} "
+                   f"current_lock_identity={current_lock_identity}",
+        )
+        wrote = True
+    differing = tuple(
+        name for name, stored, current in (
+            ("activation_identity", stored_activation_identity, current_activation_identity),
+            ("stage7_bound_input_identity", stored_stage7_identity, current_stage7_identity),
+        ) if stored != current
+    )
+    return (
+        s9.Stage9LockResult(
+            game_run_id=game_run_id, outcome=s9.CHANGED_PROVENANCE,
+            lock_identity=stored_lock_identity,
+            activation_identity=stored_activation_identity,
+            stage7_bound_input_identity=stored_stage7_identity,
+            cutoff_relationship=stored_cutoff_rel,
+            differing_inputs=differing,
+            limitations=s9.standing_limitations(),
+        ),
+        wrote,
+    )
+
 
 def run_stage_9(
     conn: object,
     slate_run_id: str,
     game_run_ids: list[str],
     env: dict | None = None,
-) -> None:
-    """Stage 9 stub — Pregame Lock (lock logic deferred to Phase 4).
+) -> list[s9.Stage9LockResult]:
+    """Stage 9 — Pregame Lock (FULL immutable per-game lock; PM-1089 / PM-1091 / PM-1092).
 
-    Writes play_locked per game as stub placeholder.
-    Transitions each game: activation_eligible → pregame_locked.
-    Transitions slate: activation_window_open → pregame_locked.
+    Finalizes each game already admitted by Stage 8 into an immutable pregame lock, bound ONLY to
+    the frozen Stage-8 admission provenance (activation identity) and the frozen Stage-7 bound
+    input identity. No live Stage-5/6/provider revalidation, no analytical value, no
+    betting-readiness claim. Emits the governed `play_locked` finalization event exactly once per
+    genuine lock (never on replay/ineligible/unavailable).
+
+    Authoritative serialization (Rich-approved D6-B): the slate row is locked FOR UPDATE first and
+    held for the transaction lifetime (lock order slate → game, matching Stage 8); persisted
+    slate/game/admission/lock state is reread after acquisition. Per game, the existing lock row is
+    checked BEFORE any freeze-boundary guard: an existing lock reconciles historically
+    (EXACT_REPLAY / CHANGED_PROVENANCE / UNAVAILABLE_INPUTS) WITHOUT re-gating the cutoff.
+    Otherwise: once the slate is pregame_locked, later arrivals are rejected (INELIGIBLE); a game
+    without a committed Stage-8 admission is INELIGIBLE; a game whose actual status is not
+    activation_eligible is INELIGIBLE; a missing/invalid frozen cutoff is UNAVAILABLE_INPUTS.
+
+    A fresh timezone-aware decision_time is captured immediately before the lock write, sampled
+    AFTER the lock/rereads (post-wait). The strict freeze boundary requires
+    decision_time < scheduled_cutoff_at; equality/after → INELIGIBLE (Stage 9 does NOT copy
+    Stage 8's admission rule — this is a distinct lock-validity gate on a distinct post-wait clock,
+    using the already-frozen cutoff). The slate transitions activation_window_open → pregame_locked
+    ONCE iff EVERY Stage-8 admission for the slate is now locked (aggregate completion); a slate
+    with any unlocked admission stays open (incomplete) — Stage 9 invents no closure authority.
+
+    One Orchestrator-owned transaction (DCR-W5-001): write outcomes commit once at the end and are
+    returned only after commit; read-only invocations perform no commit. A uniqueness conflict on
+    insert is an unexpected defensive condition: ROLLBACK TO SAVEPOINT, then reconcile ONLY a
+    verified committed lock; otherwise rollback-and-raise Stage9LockError (no new-lock retry, no
+    stale-timestamp reuse). Any failure rolls the whole stage back and raises. Historical lock is
+    not perpetual permission after cutoff; no scheduler, no automatic invocation, no cutoff firing,
+    no auto-close.
     """
     _check_kill_switch(env=env)
-    logger.info("Stage 9 stub: pregame lock logic deferred to Phase 4")
 
-    now = _now_utc()
-    for game_run_id in game_run_ids:
-        record_event(
-            conn, "play_locked", slate_run_id, now,
-            game_run_id=game_run_id,
-        )
-        transition_game_state("activation_eligible", "pregame_locked")
-        _update_game_status(conn, game_run_id, "pregame_locked")
+    results: list[s9.Stage9LockResult] = []
+    wrote = False
+    locked_any = False
 
-    transition_slate_state("activation_window_open", "pregame_locked")
-    _update_slate_status(conn, slate_run_id, "pregame_locked")
+    try:
+        # Fixed lock order step 1: slate row FOR UPDATE (authoritative race path), held for the
+        # transaction lifetime; its run_status is the post-wait persisted slate state.
+        slate_status = _lock_slate_for_update(conn, slate_run_id)
+        slate_already_locked = slate_status == "pregame_locked"
 
-    conn.commit()
+        for game_run_id in game_run_ids:
+            # Membership enforcement FIRST: the game's persisted slate_run_id must equal the locked
+            # slate before any lock, reconciliation, or related write. Checked BEFORE existence-first
+            # reconciliation so a foreign slate's lock is never reconciled as belonging to this slate.
+            membership = _fetch_game_membership(conn, game_run_id)
+            if membership is None or membership[0] != slate_run_id:
+                results.append(s9.Stage9LockResult(
+                    game_run_id=game_run_id, outcome=s9.INELIGIBLE,
+                    reason=s9.REASON_NOT_IN_SLATE,
+                ))
+                continue
+            game_status = membership[1]
+
+            # Existence-first precedence: reconcile a prior lock historically before any guard.
+            existing_lock = _fetch_stage9_lock(conn, game_run_id)
+            admission = _fetch_stage8_activation(conn, game_run_id)
+
+            if existing_lock is not None:
+                result, did_write = _reconcile_existing_stage9_lock(
+                    conn, slate_run_id, game_run_id, existing_lock, admission,
+                )
+                wrote = wrote or did_write
+                results.append(result)
+                continue
+
+            # Later-arrival rejection: never add to a slate whose window is already locked.
+            if slate_already_locked:
+                results.append(s9.Stage9LockResult(
+                    game_run_id=game_run_id, outcome=s9.INELIGIBLE,
+                    reason=s9.REASON_SLATE_ALREADY_LOCKED,
+                ))
+                continue
+
+            # Admission dependency (no re-run of Stage-8 eligibility; provenance consumed only).
+            if admission is None:
+                results.append(s9.Stage9LockResult(
+                    game_run_id=game_run_id, outcome=s9.INELIGIBLE,
+                    reason=s9.REASON_NO_ADMISSION,
+                ))
+                continue
+
+            # Actual persisted state (no hard-coded from_state).
+            if game_status != "activation_eligible":
+                results.append(s9.Stage9LockResult(
+                    game_run_id=game_run_id, outcome=s9.INELIGIBLE,
+                    reason=s9.REASON_NOT_ACTIVATION_ELIGIBLE,
+                ))
+                continue
+
+            activation_identity = admission[0]
+            stage7_bound_input_identity = admission[1]
+            scheduled_cutoff_at = admission[2]
+
+            if not s9.is_timezone_aware(scheduled_cutoff_at):
+                results.append(s9.Stage9LockResult(
+                    game_run_id=game_run_id, outcome=s9.UNAVAILABLE_INPUTS,
+                    reason=s9.REASON_CUTOFF_MISSING_OR_INVALID,
+                ))
+                continue
+
+            # Fresh, timezone-aware decision_time AFTER waits/rereads, immediately before the lock
+            # write (post-wait). Strict freeze boundary; equality/after rejects.
+            decision_time = _now_utc()
+            if not s9.is_before_cutoff(decision_time, scheduled_cutoff_at):
+                results.append(s9.Stage9LockResult(
+                    game_run_id=game_run_id, outcome=s9.INELIGIBLE,
+                    reason=s9.REASON_AT_OR_AFTER_CUTOFF,
+                ))
+                continue
+
+            cutoff_rel = s9.cutoff_relationship(decision_time, scheduled_cutoff_at)
+            lock_identity = s9.compute_lock_identity(
+                game_run_id, activation_identity, stage7_bound_input_identity,
+            )
+            limitations = list(s9.standing_limitations())
+
+            cur = conn.cursor()
+            try:
+                cur.execute("SAVEPOINT sp_stage9_lock")
+            finally:
+                cur.close()
+            try:
+                _insert_stage9_lock(
+                    conn, game_run_id, slate_run_id, activation_identity,
+                    stage7_bound_input_identity, lock_identity, scheduled_cutoff_at,
+                    cutoff_rel, limitations, decision_time,
+                )
+            except Exception as exc:  # unexpected uniqueness conflict → defensive recovery only
+                if getattr(exc, "pgcode", None) != _PG_UNIQUE_VIOLATION:
+                    raise
+                cur = conn.cursor()
+                try:
+                    cur.execute("ROLLBACK TO SAVEPOINT sp_stage9_lock")
+                finally:
+                    cur.close()
+                existing_now = _fetch_stage9_lock(conn, game_run_id)
+                if existing_now is None:
+                    # Uniqueness alone is never success; no verified committed lock exists.
+                    raise Stage9LockError(
+                        f"uniqueness conflict for {game_run_id} with no committed lock"
+                    )
+                admission_now = _fetch_stage8_activation(conn, game_run_id)
+                result, did_write = _reconcile_existing_stage9_lock(
+                    conn, slate_run_id, game_run_id, existing_now, admission_now,
+                )
+                wrote = wrote or did_write
+                results.append(result)
+                continue
+            else:
+                cur = conn.cursor()
+                try:
+                    cur.execute("RELEASE SAVEPOINT sp_stage9_lock")
+                finally:
+                    cur.close()
+
+            _insert_lifecycle_audit(
+                conn, game_run_id=game_run_id, slate_run_id=slate_run_id,
+                stage="9", event="stage9_pregame_locked",
+                detail=f"lock_identity={lock_identity} "
+                       f"activation_identity={activation_identity} "
+                       f"stage7_bound_input_identity={stage7_bound_input_identity} "
+                       f"cutoff_relationship={cutoff_rel}",
+            )
+            transition_game_state("activation_eligible", "pregame_locked")
+            _update_game_status(conn, game_run_id, "pregame_locked")
+            record_event(
+                conn, "play_locked", slate_run_id, decision_time,
+                game_run_id=game_run_id,
+                payload={
+                    "lock_stage": "9",
+                    "lock_identity": lock_identity,
+                    "activation_identity": activation_identity,
+                    "stage7_bound_input_identity": stage7_bound_input_identity,
+                    "scheduled_cutoff_at": scheduled_cutoff_at.isoformat(),
+                    "cutoff_relationship": cutoff_rel,
+                },
+            )
+            wrote = True
+            locked_any = True
+            results.append(s9.Stage9LockResult(
+                game_run_id=game_run_id, outcome=s9.LOCKED,
+                lock_identity=lock_identity,
+                activation_identity=activation_identity,
+                stage7_bound_input_identity=stage7_bound_input_identity,
+                cutoff_relationship=cutoff_rel,
+                limitations=tuple(limitations),
+            ))
+            logger.info(
+                "Stage 9: locked game_run_id=%s lock_identity=%s", game_run_id, lock_identity,
+            )
+
+        # Aggregate slate completion: transition ONCE iff every Stage-8 admission for the slate is
+        # now locked and the slate is currently activation_window_open. Any unlocked admission
+        # leaves the slate open (incomplete); no closure authority is invented.
+        if locked_any and slate_status == "activation_window_open" and _all_admissions_locked(
+            conn, slate_run_id,
+        ):
+            transition_slate_state("activation_window_open", "pregame_locked")
+            _update_slate_status(conn, slate_run_id, "pregame_locked")
+            wrote = True
+
+        if wrote:
+            conn.commit()
+        return results
+    except Exception:
+        conn.rollback()
+        raise
 
 
 # ---------------------------------------------------------------------------

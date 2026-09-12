@@ -64,6 +64,7 @@ from backend.oracle.adapter_interface import (
     PreliminaryDataResponse,
     UnavailabilityReason,
 )
+from backend.oracle import stage9_pregame_lock as s9
 from backend.oracle.orchestrator import (
     KillSwitchHaltError,
     OrchestratorError,
@@ -1685,35 +1686,48 @@ class TestStage8ActivationWindow:
 
 
 class TestStage9PregameLock:
-    """R — Stage 9 stub: play_locked per game; game→pregame_locked; slate→pregame_locked."""
+    """R — Stage 9 pregame lock (FULL immutable lock; PM-1089/1091/1092).
+
+    Orchestrator-level unit behaviour with a mock connection whose reads return None (no persisted
+    slate/game/admission state): every game is truthfully INELIGIBLE (not_in_slate), nothing is
+    locked, no play_locked event is emitted, and no commit occurs. This proves the corrected
+    membership-first / actual-state discipline (no silent lock). Full DB acceptance — locking,
+    replay, freeze boundary, aggregate completion, contention, defensive recovery — lives in
+    backend/tests/test_stage9.py.
+    """
 
     def _run(self, conn=None, env=_ENABLED_ENV):
         if conn is None:
             conn = _StageConn()
         with patch(_PATCH_RECORD_EVENT, return_value=1) as mock_re:
-            run_stage_9(conn, _TEST_SLATE_ID, _TEST_GAME_IDS, env=env)
-        return conn, mock_re
+            results = run_stage_9(conn, _TEST_SLATE_ID, _TEST_GAME_IDS, env=env)
+        return conn, mock_re, results
 
-    def test_writes_play_locked_per_game(self):
-        _, mock_re = self._run()
+    def test_returns_one_result_per_game(self):
+        _, _, results = self._run()
+        assert [r.game_run_id for r in results] == list(_TEST_GAME_IDS)
+
+    def test_all_ineligible_not_in_slate_without_persisted_state(self):
+        _, _, results = self._run()
+        assert all(r.outcome == s9.INELIGIBLE for r in results)
+        assert all(r.reason == s9.REASON_NOT_IN_SLATE for r in results)
+
+    def test_no_play_locked_event_when_nothing_locked(self):
+        _, mock_re, _ = self._run()
         event_types = [c[0][1] for c in mock_re.call_args_list]
-        assert event_types.count("play_locked") == 2
+        assert event_types.count("play_locked") == 0
 
-    def test_updates_game_status_to_pregame_locked(self):
-        conn, _ = self._run()
-        game_updates = [c for c in conn.cursors if any("UPDATE" in s.upper() and "oracle_game_analyses" in s.lower() for s in c.sql_log)]
-        for c in game_updates:
-            assert "pregame_locked" in c.params_log[0]
+    def test_no_commit_when_nothing_locked(self):
+        conn, _, _ = self._run()
+        assert conn.commit_count == 0
 
-    def test_updates_slate_status_to_pregame_locked(self):
-        conn, _ = self._run()
-        slate_updates = [c for c in conn.cursors if any("UPDATE" in s.upper() and "oracle_slate_runs" in s.lower() for s in c.sql_log)]
-        assert len(slate_updates) == 1
-        assert "pregame_locked" in slate_updates[0].params_log[0]
-
-    def test_commits_exactly_once(self):
-        conn, _ = self._run()
-        assert conn.commit_count == 1
+    def test_no_game_status_update_when_nothing_locked(self):
+        conn, _, _ = self._run()
+        game_updates = [
+            c for c in conn.cursors
+            if any("UPDATE" in s.upper() and "oracle_game_analyses" in s.lower() for s in c.sql_log)
+        ]
+        assert game_updates == []
 
 
 class TestStage10Settlement:
