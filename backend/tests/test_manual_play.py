@@ -1,9 +1,12 @@
 """Acceptance tests for MANUAL paper-play recording (PM-1139; validation completed under PM-1141).
 
-Connection enforcement is installed at import — BEFORE importing the code under test or attempting
-any connection. Tests may reach a database ONLY at 127.0.0.1:5432/oracle_manual_play_test; the
-maintenance `postgres` db is permitted ONLY during the bounded create/drop windows. Every destination
-is validated and REJECTED BEFORE any connection is opened, with credential-stripped attempt evidence.
+Connection enforcement is scoped to the disposable lifecycle via the `gate_active()` context
+manager and is NEVER installed at import (PM-1151 fix: the previous import-time global patch of
+psycopg2.connect leaked a deny-all default phase into the whole test session, rejecting unrelated
+DB tests in the full CI suite). While active, tests may reach a database ONLY at
+127.0.0.1:5432/oracle_manual_play_test; maintenance `postgres` is permitted ONLY during the bounded
+create/drop windows; every destination is validated and REJECTED BEFORE any connection is opened,
+with credential-stripped attempt evidence. The original connector is ALWAYS restored on exit.
 
 The real disposable-DB lifecycle (absent -> create -> provision-through-014 -> test -> drop -> absent)
 runs ONLY when an explicitly approved loopback DSN is provided in ORACLE_MANUAL_PLAY_TEST_DSN. Credential
@@ -13,6 +16,7 @@ connection is attempted. Pure-logic, mock-connection, and connection-gate negati
 
 from __future__ import annotations
 
+import contextlib
 import os
 import pathlib
 from datetime import date, datetime, timezone
@@ -82,14 +86,32 @@ def guarded_connect(_real_connect, dsn=None, **kw):
 
 try:  # pragma: no cover - environment dependent
     import psycopg2 as _pg
-    _REAL_CONNECT = _pg.connect
+    _REAL_CONNECT = _pg.connect  # captured only; NOT patched at import (PM-1151 fix)
+except Exception:  # psycopg2 absent — pure/mock tests still run
+    _pg = None
+    _REAL_CONNECT = None
+
+
+@contextlib.contextmanager
+def gate_active():
+    """Install the destination gate over psycopg2.connect for the block, then ALWAYS restore
+    the original connector (on success or failure). Enforcement is retained only while active;
+    the gate is NEVER installed at import (that global leak is the PM-1151 defect being fixed).
+    """
+    if _pg is None:
+        yield
+        return
+    original = _pg.connect
 
     def _wrapped(dsn=None, **kw):
         return guarded_connect(_REAL_CONNECT, dsn, **kw)
 
     _pg.connect = _wrapped
-except Exception:  # psycopg2 absent — pure/mock tests still run
-    _pg = None
+    try:
+        yield
+    finally:
+        _pg.connect = original
+        set_phase(None)
 
 from backend.oracle import identifier_manager as im  # noqa: E402
 from backend.oracle import manual_play as mp  # noqa: E402
@@ -193,6 +215,46 @@ def test_gate_rejects_before_connect_with_sanitized_evidence():
     assert _attempts and _attempts[-1]["allowed"] is False
     assert "secret" not in _attempts[-1]["dest"] and "***" in _attempts[-1]["dest"]
     set_phase(None)
+
+
+# --- Gate scoping regression (PM-1151): no import leak; restore on success/failure ---
+
+def test_import_does_not_globally_patch_connect():
+    # The defect was an import-time global patch. After import, psycopg2.connect must be the
+    # original — importing this module leaks no wrapper into the shared session.
+    if _pg is None:
+        pytest.skip("psycopg2 not importable")
+    assert _pg.connect is _REAL_CONNECT
+
+
+def test_gate_active_installs_enforces_and_restores_on_success():
+    if _pg is None:
+        pytest.skip("psycopg2 not importable")
+    assert _pg.connect is _REAL_CONNECT
+    with gate_active():
+        assert _pg.connect is not _REAL_CONNECT           # installed
+        set_phase("test")
+        with pytest.raises(ConnectionRejected):           # retained enforcement while active
+            _pg.connect("postgresql://u:p@127.0.0.1:5432/postgres")  # wrong db in test phase
+    assert _pg.connect is _REAL_CONNECT                    # restored after success
+
+
+def test_gate_active_restores_on_failure():
+    if _pg is None:
+        pytest.skip("psycopg2 not importable")
+    with pytest.raises(RuntimeError):
+        with gate_active():
+            assert _pg.connect is not _REAL_CONNECT
+            raise RuntimeError("boom inside gated block")
+    assert _pg.connect is _REAL_CONNECT                    # restored after failure
+
+
+def test_deny_all_default_phase_is_the_leak_mechanism():
+    # Establishes the defect mechanism: with the gate installed and the default (None) phase,
+    # ALL destinations are denied — which, if leaked globally at import, rejects unrelated DB
+    # tests. The fix keeps this deny-all ONLY while gate_active() is in scope.
+    assert evaluate_destination(None, "127.0.0.1", 5432, "mlb_test")[0] is False
+    assert evaluate_destination(None, "127.0.0.1", 5432, _TEST_DBNAME)[0] is False
 
 
 # --- Mock-connection ordering / replay (no real DB) --------------------------
@@ -376,155 +438,172 @@ def test_disposable_db_lifecycle():  # pragma: no cover - runs only with approve
     maint = _maintenance_dsn(dsn)
     evid = []
 
-    # ABSENT (pre) + ABORT if the task DB already exists.
-    set_phase("maintenance")
-    mc = psycopg2.connect(maint); mc.autocommit = True
     try:
-        cur = mc.cursor()
-        cur.execute("SELECT 1 FROM pg_database WHERE datname = %s", (db,))
-        assert cur.fetchone() is None, "ABORT: task DB already exists"
-        evid.append("absent_pre=True")
-        cur.execute(f'CREATE DATABASE "{db}"')
-        evid.append("create=ok")
-        cur.close()
-    finally:
-        mc.close(); set_phase(None)
-
-    try:
-        set_phase("test")
-        tc = psycopg2.connect(dsn); tc.autocommit = False
-        try:
-            cur = tc.cursor()
-            files = [_REPO / "database" / "schema.sql"] + sorted(
-                (_REPO / "database" / "migrations").glob("*.sql"))
-            for f in files:
-                _apply_sql_file(cur, f)
-            tc.commit()
-            evid.append(f"provision={len(files)}_files")
-
-            # Migration 014 rerunnability (idempotent).
-            _apply_sql_file(cur, _REPO / "database" / "migrations"
-                            / "014_add_oracle_manual_play_provenance.sql")
-            tc.commit(); evid.append("mig014_rerun=ok")
-
-            # Seed fixture-accounting context (slate + game).
-            cur.execute(
-                "INSERT INTO oracle_slate_runs (slate_run_id, run_date, run_status, "
-                "daily_plays_activated, run_started_at) VALUES (%s, %s, %s, %s, %s)",
-                (_SLATE, date(2026, 7, 25), "pregame_locked", 0, _TS))
-            for gid, ext in ((_GAME, "746484"), (_GAME2, "746485"), (_GAME3, "746486")):
-                cur.execute(
-                    "INSERT INTO oracle_game_analyses (game_run_id, slate_run_id, external_game_id, "
-                    "home_team, away_team, first_pitch_time, game_status) "
-                    "VALUES (%s, %s, %s, %s, %s, %s, %s)",
-                    (gid, _SLATE, ext, "NYY", "BOS", _TS, "pregame_locked"))
-            tc.commit()
-
-            # CONSTRAINTS: MANUAL-scoped odds CHECK rejects |odds| < 100.
-            with pytest.raises(pgerr.CheckViolation):
-                cur.execute(
-                    "INSERT INTO oracle_plays (play_id, candidate_id, slate_run_id, game_run_id, "
-                    "market, selected_side, odds_at_nomination, stake_units, nomination_timestamp, "
-                    "play_status, origin) VALUES "
-                    "('EO-2026-900','MANUAL-CAND-x','%s','%s','ML','away',50,1.0,%%s,'nominated','MANUAL')"
-                    % (_SLATE, _GAME), (_TS,))
-            tc.rollback()
-
-            # REPLAY: RECORDED -> EXACT_REPLAY (first ts preserved) -> CHANGED_INPUT.
-            r1 = _record(tc)
-            assert r1.outcome == RECORDED
-            r2 = _record(tc, nomination_timestamp=datetime(2026, 7, 25, 23, 0, tzinfo=timezone.utc))
-            assert r2.outcome == EXACT_REPLAY and r2.nomination_timestamp == _TS
-            r3 = _record(tc, odds_at_nomination=150)
-            assert r3.outcome == CHANGED_INPUT
-            evid.append("replay=RECORDED/EXACT_REPLAY/CHANGED_INPUT")
-
-            # DETERMINISTIC TWO-CONNECTION CONTENTION: production 23505 + savepoint recovery.
-            # A competing connection commits the SAME MANUAL identity AFTER B's existence-check
-            # (injected inside generate_play_id) and BEFORE B's INSERT, forcing a real 23505 on the
-            # partial unique index; record_manual_play must ROLLBACK TO SAVEPOINT, re-read, and
-            # reconcile to EXACT_REPLAY (same inputs) or CHANGED_INPUT (differing inputs).
-            def _contend(game, a_odds, b_odds, a_play_id):
-                ca = psycopg2.connect(dsn); ca.autocommit = False  # gate: test-phase, allowed
-                orig_gen = mp.generate_play_id
-                fired = {"done": False}
-
-                def racing_gen(cur_date, conn, cap):
-                    if not fired["done"]:
-                        ac = ca.cursor()
-                        ac.execute(
-                            "INSERT INTO oracle_plays (play_id, candidate_id, slate_run_id, "
-                            "game_run_id, market, selected_side, odds_at_nomination, stake_units, "
-                            "nomination_timestamp, play_status, origin) VALUES "
-                            "(%s,%s,%s,%s,'ML','home',%s,1.0,%s,'nominated','MANUAL')",
-                            (a_play_id, f"MANUAL-CAND-{game}-ML-home", _SLATE, game, a_odds, _TS))
-                        ac.close(); ca.commit(); fired["done"] = True
-                    return orig_gen(cur_date, conn, cap)
-
-                mp.generate_play_id = racing_gen
-                try:
-                    return record_manual_play(
-                        tc, slate_run_id=_SLATE, game_run_id=game, market="ML",
-                        selected_side="home", odds_at_nomination=b_odds, nomination_timestamp=_TS,
-                        current_date_et=date(2026, 7, 25), data_origin=CONTEXT_TEST_FIXTURE, env=_ENABLED)
-                finally:
-                    mp.generate_play_id = orig_gen
-                    ca.close()
-
-            r_ex = _contend(_GAME2, 120, 120, "EO-2026-500")
-            assert r_ex.outcome == EXACT_REPLAY
-            r_ch = _contend(_GAME3, 150, 120, "EO-2026-501")
-            assert r_ch.outcome == CHANGED_INPUT
-            assert r_ch.divergence["stored_odds_at_nomination"] == 150
-            evid.append("two_conn_23505=EXACT_REPLAY+CHANGED_INPUT")
-
-            # CONCURRENCY backstop: partial unique index rejects a duplicate MANUAL identity.
-            with pytest.raises(pgerr.UniqueViolation):
-                cur.execute(
-                    "INSERT INTO oracle_plays (play_id, candidate_id, slate_run_id, game_run_id, "
-                    "market, selected_side, odds_at_nomination, stake_units, nomination_timestamp, "
-                    "play_status, origin) VALUES "
-                    "('EO-2026-901','MANUAL-CAND-y','%s','%s','ML','home',120,1.0,%%s,'nominated','MANUAL')"
-                    % (_SLATE, _GAME), (_TS,))
-            tc.rollback()
-            evid.append("unique_index=enforced")
-
-            # ATOMIC ROLLBACK: fail between row insert and event -> neither persists.
-            orig_record_event = mp.record_event
-            mp.record_event = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom"))
+        with gate_active():
+            # ABSENT (pre) + ABORT if the task DB already exists.
+            set_phase("maintenance")
+            mc = psycopg2.connect(maint); mc.autocommit = True
             try:
-                with pytest.raises(RuntimeError):
-                    _record(tc, selected_side="away")
+                cur = mc.cursor()
+                cur.execute("SELECT 1 FROM pg_database WHERE datname = %s", (db,))
+                assert cur.fetchone() is None, "ABORT: task DB already exists"
+                evid.append("absent_pre=True")
+                cur.execute(f'CREATE DATABASE "{db}"')
+                evid.append("create=ok")
+                cur.close()
             finally:
-                mp.record_event = orig_record_event
-            cur.execute("SELECT COUNT(*) FROM oracle_plays WHERE game_run_id=%s AND selected_side='away'",
-                        (_GAME,))
-            assert cur.fetchone()[0] == 0
-            evid.append("atomic_rollback=ok")
+                mc.close()
 
-            # DESTINATION REJECTION during test phase (reject before connect).
-            with pytest.raises(ConnectionRejected):
-                psycopg2.connect(_maintenance_dsn(dsn))  # postgres db not allowed in 'test' phase
-            evid.append("destination_rejection=ok")
-            cur.close()
-        finally:
-            tc.close(); set_phase(None)
-    finally:
-        # CLEANUP: drop + verify absent (always attempted).
-        set_phase("maintenance")
-        mc = psycopg2.connect(maint); mc.autocommit = True
+            set_phase("test")
+            tc = psycopg2.connect(dsn); tc.autocommit = False
+            try:
+                cur = tc.cursor()
+                files = [_REPO / "database" / "schema.sql"] + sorted(
+                    (_REPO / "database" / "migrations").glob("*.sql"))
+                for f in files:
+                    _apply_sql_file(cur, f)
+                tc.commit()
+                evid.append(f"provision={len(files)}_files")
+
+                # Migration 014 rerunnability (idempotent).
+                _apply_sql_file(cur, _REPO / "database" / "migrations"
+                                / "014_add_oracle_manual_play_provenance.sql")
+                tc.commit(); evid.append("mig014_rerun=ok")
+
+                # Seed fixture-accounting context (slate + game).
+                cur.execute(
+                    "INSERT INTO oracle_slate_runs (slate_run_id, run_date, run_status, "
+                    "daily_plays_activated, run_started_at) VALUES (%s, %s, %s, %s, %s)",
+                    (_SLATE, date(2026, 7, 25), "pregame_locked", 0, _TS))
+                for gid, ext in ((_GAME, "746484"), (_GAME2, "746485"), (_GAME3, "746486")):
+                    cur.execute(
+                        "INSERT INTO oracle_game_analyses (game_run_id, slate_run_id, external_game_id, "
+                        "home_team, away_team, first_pitch_time, game_status) "
+                        "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                        (gid, _SLATE, ext, "NYY", "BOS", _TS, "pregame_locked"))
+                tc.commit()
+
+                # CONSTRAINTS: MANUAL-scoped odds CHECK rejects |odds| < 100.
+                with pytest.raises(pgerr.CheckViolation):
+                    cur.execute(
+                        "INSERT INTO oracle_plays (play_id, candidate_id, slate_run_id, game_run_id, "
+                        "market, selected_side, odds_at_nomination, stake_units, nomination_timestamp, "
+                        "play_status, origin) VALUES "
+                        "('EO-2026-900','MANUAL-CAND-x','%s','%s','ML','away',50,1.0,%%s,'nominated','MANUAL')"
+                        % (_SLATE, _GAME), (_TS,))
+                tc.rollback()
+
+                # REPLAY: RECORDED -> EXACT_REPLAY (first ts preserved) -> CHANGED_INPUT.
+                r1 = _record(tc)
+                assert r1.outcome == RECORDED
+                r2 = _record(tc, nomination_timestamp=datetime(2026, 7, 25, 23, 0, tzinfo=timezone.utc))
+                assert r2.outcome == EXACT_REPLAY and r2.nomination_timestamp == _TS
+                r3 = _record(tc, odds_at_nomination=150)
+                assert r3.outcome == CHANGED_INPUT
+                evid.append("replay=RECORDED/EXACT_REPLAY/CHANGED_INPUT")
+
+                # DETERMINISTIC TWO-CONNECTION CONTENTION: production 23505 + savepoint recovery.
+                # A competing connection commits the SAME MANUAL identity AFTER B's existence-check
+                # (injected inside generate_play_id) and BEFORE B's INSERT, forcing a real 23505 on the
+                # partial unique index; record_manual_play must ROLLBACK TO SAVEPOINT, re-read, and
+                # reconcile to EXACT_REPLAY (same inputs) or CHANGED_INPUT (differing inputs).
+                def _contend(game, a_odds, b_odds, a_play_id):
+                    ca = psycopg2.connect(dsn); ca.autocommit = False  # gate: test-phase, allowed
+                    orig_gen = mp.generate_play_id
+                    fired = {"done": False}
+
+                    def racing_gen(cur_date, conn, cap):
+                        if not fired["done"]:
+                            ac = ca.cursor()
+                            ac.execute(
+                                "INSERT INTO oracle_plays (play_id, candidate_id, slate_run_id, "
+                                "game_run_id, market, selected_side, odds_at_nomination, stake_units, "
+                                "nomination_timestamp, play_status, origin) VALUES "
+                                "(%s,%s,%s,%s,'ML','home',%s,1.0,%s,'nominated','MANUAL')",
+                                (a_play_id, f"MANUAL-CAND-{game}-ML-home", _SLATE, game, a_odds, _TS))
+                            ac.close(); ca.commit(); fired["done"] = True
+                        return orig_gen(cur_date, conn, cap)
+
+                    mp.generate_play_id = racing_gen
+                    try:
+                        return record_manual_play(
+                            tc, slate_run_id=_SLATE, game_run_id=game, market="ML",
+                            selected_side="home", odds_at_nomination=b_odds, nomination_timestamp=_TS,
+                            current_date_et=date(2026, 7, 25), data_origin=CONTEXT_TEST_FIXTURE, env=_ENABLED)
+                    finally:
+                        mp.generate_play_id = orig_gen
+                        ca.close()
+
+                r_ex = _contend(_GAME2, 120, 120, "EO-2026-500")
+                assert r_ex.outcome == EXACT_REPLAY
+                r_ch = _contend(_GAME3, 150, 120, "EO-2026-501")
+                assert r_ch.outcome == CHANGED_INPUT
+                assert r_ch.divergence["stored_odds_at_nomination"] == 150
+                evid.append("two_conn_23505=EXACT_REPLAY+CHANGED_INPUT")
+
+                # CONCURRENCY backstop: partial unique index rejects a duplicate MANUAL identity.
+                with pytest.raises(pgerr.UniqueViolation):
+                    cur.execute(
+                        "INSERT INTO oracle_plays (play_id, candidate_id, slate_run_id, game_run_id, "
+                        "market, selected_side, odds_at_nomination, stake_units, nomination_timestamp, "
+                        "play_status, origin) VALUES "
+                        "('EO-2026-901','MANUAL-CAND-y','%s','%s','ML','home',120,1.0,%%s,'nominated','MANUAL')"
+                        % (_SLATE, _GAME), (_TS,))
+                tc.rollback()
+                evid.append("unique_index=enforced")
+
+                # ATOMIC ROLLBACK: fail between row insert and event -> neither persists.
+                orig_record_event = mp.record_event
+                mp.record_event = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom"))
+                try:
+                    with pytest.raises(RuntimeError):
+                        _record(tc, selected_side="away")
+                finally:
+                    mp.record_event = orig_record_event
+                cur.execute("SELECT COUNT(*) FROM oracle_plays WHERE game_run_id=%s AND selected_side='away'",
+                            (_GAME,))
+                assert cur.fetchone()[0] == 0
+                evid.append("atomic_rollback=ok")
+
+                # DESTINATION REJECTION during test phase (reject before connect).
+                with pytest.raises(ConnectionRejected):
+                    psycopg2.connect(_maintenance_dsn(dsn))  # postgres db not allowed in 'test' phase
+                evid.append("destination_rejection=ok")
+                cur.close()
+            finally:
+                tc.close()
+
+        # Gate RESTORED here (context exited). Prove restoration + unrelated DB access.
+        assert _pg.connect is _REAL_CONNECT, "connector not restored after gate_active"
+        evid.append("connector_restored=True")
+        # UNRELATED DB-backed test against the SAME task DB, ungated (as an ordinary suite test).
+        set_phase(None)  # even a deny-all phase is irrelevant once the gate is uninstalled
+        cu = psycopg2.connect(dsn); cu.autocommit = True
         try:
-            cur = mc.cursor()
-            cur.execute(
-                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
-                "WHERE datname = %s AND pid <> pg_backend_pid()", (db,))
-            cur.execute(f'DROP DATABASE IF EXISTS "{db}"')
-            cur.execute("SELECT 1 FROM pg_database WHERE datname = %s", (db,))
-            assert cur.fetchone() is None
-            evid.append("drop=ok absent_post=True")
-            cur.close()
+            ucur = cu.cursor()
+            ucur.execute("SELECT COUNT(*) FROM oracle_plays")
+            _ = ucur.fetchone()
+            ucur.close()
+            evid.append("unrelated_db_after_restore=ok")
         finally:
-            mc.close(); set_phase(None)
+            cu.close()
+    finally:
+        # CLEANUP: drop + verify absent (gated; always attempted).
+        with gate_active():
+            set_phase("maintenance")
+            mc = psycopg2.connect(maint); mc.autocommit = True
+            try:
+                cur = mc.cursor()
+                cur.execute(
+                    "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                    "WHERE datname = %s AND pid <> pg_backend_pid()", (db,))
+                cur.execute(f'DROP DATABASE IF EXISTS "{db}"')
+                cur.execute("SELECT 1 FROM pg_database WHERE datname = %s", (db,))
+                assert cur.fetchone() is None
+                evid.append("drop=ok absent_post=True")
+                cur.close()
+            finally:
+                mc.close()
 
     print("LIFECYCLE_EVIDENCE:", " | ".join(evid))
     assert evid  # lifecycle markers captured for evidence
