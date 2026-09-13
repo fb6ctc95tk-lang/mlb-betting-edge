@@ -129,6 +129,19 @@ def _create_play_id_capability() -> _PlayIdCapability:
     return _PlayIdCapability()
 
 
+def create_manual_play_id_capability() -> _PlayIdCapability:
+    """Return a Play-ID capability token for the sanctioned MANUAL paper-play path.
+
+    Sanctions backend/oracle/manual_play.py as an authorized caller of
+    generate_play_id() for manually-recorded paper plays (origin='MANUAL').
+
+    This token is an anti-accident guard ONLY. It is NOT a cryptographic or
+    security boundary and enforces no authorization; it merely prevents
+    accidental Play-ID generation from unrelated call sites.
+    """
+    return _create_play_id_capability()
+
+
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
