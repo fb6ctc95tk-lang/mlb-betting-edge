@@ -52,6 +52,8 @@ ORACLE_TABLES = [
     "oracle_stage8_activation_window",
     # Stage 9 (migration 013)
     "oracle_stage9_pregame_lock",
+    # Market-Odds Observation (migration 015)
+    "oracle_market_odds_observations",
 ]
 
 # Stage 6 (migration 010) table — registered explicitly to keep the approved
