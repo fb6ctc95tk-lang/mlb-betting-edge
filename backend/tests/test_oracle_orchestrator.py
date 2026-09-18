@@ -32,11 +32,14 @@ Sections:
 
 from __future__ import annotations
 
+import contextlib
 import os
 from datetime import date, datetime, timedelta, timezone
 from unittest.mock import MagicMock, call, patch
 
 import pytest
+
+from backend.oracle import live_schedule as _ls
 
 from backend.oracle.fixtures import (
     FixtureValidationError,
@@ -68,6 +71,7 @@ from backend.oracle import stage9_pregame_lock as s9
 from backend.oracle.orchestrator import (
     KillSwitchHaltError,
     OrchestratorError,
+    Stage2ReplayInconsistencyError,
     run_oracle_phase1,
     run_stage_1,
     run_stage_2,
@@ -975,6 +979,9 @@ class _MockCursor:
     def fetchone(self):
         return None
 
+    def fetchall(self):
+        return []
+
     def close(self) -> None:
         self.closed = True
 
@@ -1249,11 +1256,7 @@ class TestStage2ScheduleRetrieval:
     def _run(self, conn=None, env=_ENABLED_ENV):
         if conn is None:
             conn = _StageConn()
-        with patch(_PATCH_LOAD_FIXTURES, return_value=_FIXTURE_RECORDS), \
-             patch(_PATCH_VALIDATE_FIXTURE), \
-             patch(_PATCH_GET_GAME_PK, side_effect=lambda r: int(r["external_game_id"])), \
-             patch(_PATCH_GENERATE_GAME, side_effect=lambda s, a, h, pk: f"{s}-{a}-{h}-{pk}"), \
-             patch(_PATCH_RECORD_EVENT, return_value=1) as mock_re:
+        with _stage2_mock_patches() as mock_re:
             result = run_stage_2(conn, _TEST_SLATE_ID, env=env)
         return result, conn, mock_re
 
@@ -1459,6 +1462,49 @@ class _FakePolicy:
     time_cutoff_offset = timedelta(minutes=-15)
 
 
+# --- Stage-2 live/fixture-provider mock harness (PM-1271) --------------------
+_PATCH_SCHED_RETRIEVE = "backend.oracle.orchestrator.sched.retrieve"
+_PATCH_READ_SLATE = "backend.oracle.orchestrator._read_slate_status_and_date"
+_PATCH_LOCK_SLATE = "backend.oracle.orchestrator._lock_slate_for_update"
+_PATCH_DB_CLOCK = "backend.oracle.orchestrator._db_clock_now"
+_PATCH_RECONCILE_BINDING = "backend.oracle.orchestrator._reconcile_stage5_binding"
+
+_DB_CLOCK_INSTANT = datetime(2026, 7, 25, 12, 0, tzinfo=timezone.utc)
+
+
+def _two_game_snapshot():
+    """A deterministic 2-game normalized snapshot (BOS@NYY, SFG@LAD)."""
+    payload = {"dates": [{"date": "2026-07-25", "games": [
+        {"gamePk": 746484, "gameDate": "2026-07-25T17:10:00Z",
+         "status": {"detailedState": "Scheduled"},
+         "teams": {"home": {"team": {"abbreviation": "NYY"}},
+                   "away": {"team": {"abbreviation": "BOS"}}},
+         "venue": {"name": "Yankee Stadium"}},
+        {"gamePk": 746485, "gameDate": "2026-07-25T22:10:00Z",
+         "status": {"detailedState": "Scheduled"},
+         "teams": {"home": {"team": {"abbreviation": "LAD"}},
+                   "away": {"team": {"abbreviation": "SFG"}}},
+         "venue": {"name": "Dodger Stadium"}},
+    ]}]}
+    return _ls.normalize_response(payload, "2026-07-25", _DB_CLOCK_INSTANT,
+                                  mode=_ls.MODE_FIXTURE, source="oracle-fixture-schedule")
+
+
+@contextlib.contextmanager
+def _stage2_mock_patches():
+    """Patch stack so run_stage_2 executes fully against a mock connection:
+    schedule_loaded slate, a 2-game snapshot, a fixed active policy, and a
+    fixed database decision instant. Window/claim reads fall through to the
+    mock connection (no prior history)."""
+    with patch(_PATCH_READ_SLATE, return_value=("schedule_loaded", _TEST_DATE)), \
+         patch(_PATCH_LOCK_SLATE, return_value="schedule_loaded"), \
+         patch(_PATCH_SCHED_RETRIEVE, return_value=_two_game_snapshot()), \
+         patch(_PATCH_LOAD_POLICY, return_value=_FakePolicy()), \
+         patch(_PATCH_DB_CLOCK, return_value=_DB_CLOCK_INSTANT), \
+         patch(_PATCH_RECORD_EVENT, return_value=1) as mock_re:
+        yield mock_re
+
+
 def _fake_ecf_row(game_run_id):
     return (
         f"ECFR-{game_run_id}",
@@ -1484,10 +1530,12 @@ class TestStage5IntelligencePipeline:
             conn = _StageConn()
         first_pitch = datetime(2026, 7, 25, 17, 10, tzinfo=timezone.utc)
         fetch_ecf = ecf_side_effect or (lambda c, grid: _fake_ecf_row(grid))
+        binding = (first_pitch + timedelta(minutes=-15), "MLB-A3-v1")
         with patch(_PATCH_LOAD_POLICY, return_value=_FakePolicy()), \
              patch(_PATCH_FETCH_ECF, side_effect=fetch_ecf), \
              patch(_PATCH_FETCH_FIRST_PITCH, return_value=first_pitch), \
              patch(_PATCH_FETCH_PAYLOAD, return_value={"home_pitcher": "A", "away_pitcher": "B"}), \
+             patch(_PATCH_RECONCILE_BINDING, return_value=binding), \
              patch(_PATCH_RECORD_EVENT, return_value=1) as mock_re:
             run_stage_5(conn, _TEST_SLATE_ID, _TEST_GAME_IDS, env=env)
         return conn, mock_re
@@ -1783,21 +1831,13 @@ class TestEventOrderingAndCorrectness:
 
     def test_stage2_writes_exactly_three_events_for_two_fixtures(self):
         conn = _StageConn()
-        with patch(_PATCH_LOAD_FIXTURES, return_value=_FIXTURE_RECORDS), \
-             patch(_PATCH_VALIDATE_FIXTURE), \
-             patch(_PATCH_GET_GAME_PK, side_effect=lambda r: int(r["external_game_id"])), \
-             patch(_PATCH_GENERATE_GAME, side_effect=lambda s, a, h, pk: f"{s}-{a}-{h}-{pk}"), \
-             patch(_PATCH_RECORD_EVENT, return_value=1) as mock_re:
+        with _stage2_mock_patches() as mock_re:
             run_stage_2(conn, _TEST_SLATE_ID, env=_ENABLED_ENV)
         assert mock_re.call_count == 3
 
     def test_stage2_schedule_retrieved_is_event_index_0(self):
         conn = _StageConn()
-        with patch(_PATCH_LOAD_FIXTURES, return_value=_FIXTURE_RECORDS), \
-             patch(_PATCH_VALIDATE_FIXTURE), \
-             patch(_PATCH_GET_GAME_PK, side_effect=lambda r: int(r["external_game_id"])), \
-             patch(_PATCH_GENERATE_GAME, side_effect=lambda s, a, h, pk: f"{s}-{a}-{h}-{pk}"), \
-             patch(_PATCH_RECORD_EVENT, return_value=1) as mock_re:
+        with _stage2_mock_patches() as mock_re:
             run_stage_2(conn, _TEST_SLATE_ID, env=_ENABLED_ENV)
         assert mock_re.call_args_list[0][0][1] == "schedule_retrieved"
 
@@ -1822,10 +1862,12 @@ class TestEventOrderingAndCorrectness:
     def _run_stage5(self, mock_re_name="mock_re"):
         conn = _StageConn()
         first_pitch = datetime(2026, 7, 25, 17, 10, tzinfo=timezone.utc)
+        binding = (first_pitch + timedelta(minutes=-15), "MLB-A3-v1")
         with patch(_PATCH_LOAD_POLICY, return_value=_FakePolicy()), \
              patch(_PATCH_FETCH_ECF, side_effect=lambda c, grid: _fake_ecf_row(grid)), \
              patch(_PATCH_FETCH_FIRST_PITCH, return_value=first_pitch), \
              patch(_PATCH_FETCH_PAYLOAD, return_value={"home_pitcher": "A", "away_pitcher": "B"}), \
+             patch(_PATCH_RECONCILE_BINDING, return_value=binding), \
              patch(_PATCH_RECORD_EVENT, return_value=1) as mock_re:
             run_stage_5(conn, _TEST_SLATE_ID, _TEST_GAME_IDS, env=_ENABLED_ENV)
         return conn, mock_re
@@ -1856,11 +1898,7 @@ class TestTransactionOwnership:
 
     def test_stage2_connection_autocommit_remains_false_after_run(self):
         conn = _StageConn()
-        with patch(_PATCH_LOAD_FIXTURES, return_value=_FIXTURE_RECORDS), \
-             patch(_PATCH_VALIDATE_FIXTURE), \
-             patch(_PATCH_GET_GAME_PK, side_effect=lambda r: int(r["external_game_id"])), \
-             patch(_PATCH_GENERATE_GAME, side_effect=lambda s, a, h, pk: f"{s}-{a}-{h}-{pk}"), \
-             patch(_PATCH_RECORD_EVENT, return_value=1):
+        with _stage2_mock_patches():
             run_stage_2(conn, _TEST_SLATE_ID, env=_ENABLED_ENV)
         assert conn.autocommit is False
 
@@ -1899,11 +1937,7 @@ class TestTransactionOwnership:
 
     def test_stage2_does_not_close_connection(self):
         conn = _StageConn()
-        with patch(_PATCH_LOAD_FIXTURES, return_value=_FIXTURE_RECORDS), \
-             patch(_PATCH_VALIDATE_FIXTURE), \
-             patch(_PATCH_GET_GAME_PK, side_effect=lambda r: int(r["external_game_id"])), \
-             patch(_PATCH_GENERATE_GAME, side_effect=lambda s, a, h, pk: f"{s}-{a}-{h}-{pk}"), \
-             patch(_PATCH_RECORD_EVENT, return_value=1):
+        with _stage2_mock_patches():
             run_stage_2(conn, _TEST_SLATE_ID, env=_ENABLED_ENV)
         assert conn.close_count == 0
 
@@ -2017,7 +2051,8 @@ class TestIntegrationFullPhase1Run:
             cur.execute(
                 "TRUNCATE oracle_ecf_results, oracle_stage5_results, oracle_preliminary_outputs, "
                 "oracle_scheduled_cutoffs, oracle_lineup_observations, "
-                "oracle_stage7_final_analysis, oracle_stage8_activation_window"
+                "oracle_stage7_final_analysis, oracle_stage8_activation_window, "
+                "oracle_underlying_admission_claim, oracle_underlying_admission_window"
             )
             cur.execute("DELETE FROM oracle_game_analyses WHERE slate_run_id LIKE 'ORACLE-20260725-%'")
             cur.execute("DELETE FROM oracle_slate_runs WHERE slate_run_id LIKE 'ORACLE-20260725-%'")
@@ -2274,3 +2309,160 @@ class TestStage4KillSwitchPrecedesFetch:
             with pytest.raises(KillSwitchHaltError):
                 run_stage_4(_StageConn(), _TEST_SLATE_ID, _TEST_GAME_IDS, env=_DISABLED_ENV)
         mock_fetch.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# W. Stage-2 exact replay reconciliation (PM-1273 Correction 1; requires DB)
+# ---------------------------------------------------------------------------
+
+_REPLAY_DATE = date(2026, 8, 1)
+_REPLAY_LIKE = "ORACLE-20260801-%"
+
+
+class TestStage2ReplayReconciliation:
+    """W - completed Stage-2 replay validates the original snapshot's exact
+    game/content/window bindings, permits legitimate later append-only
+    supersession, and fails closed on inconsistent history (no refetch/rewrite).
+    Exercises the production _reconcile_completed_stage2 via run_stage_2."""
+
+    @pytest.fixture(autouse=True)
+    def db(self):
+        import psycopg2
+        conn = psycopg2.connect(_TEST_DB_URL)
+        conn.autocommit = False
+        self._clean(conn)
+        yield conn
+        conn.rollback()
+        self._clean(conn)
+        conn.close()
+
+    def _clean(self, conn):
+        cur = conn.cursor()
+        try:
+            cur.execute("TRUNCATE oracle_play_events")
+            cur.execute("TRUNCATE oracle_underlying_admission_claim, oracle_underlying_admission_window")
+            cur.execute("DELETE FROM oracle_game_analyses WHERE slate_run_id LIKE %s", (_REPLAY_LIKE,))
+            cur.execute("DELETE FROM oracle_slate_runs WHERE slate_run_id LIKE %s", (_REPLAY_LIKE,))
+        finally:
+            cur.close()
+        conn.commit()
+
+    def _committed_slate(self, conn):
+        slate = run_stage_1(conn, _REPLAY_DATE, env=_ENABLED_ENV)
+        ids = run_stage_2(conn, slate, env=_ENABLED_ENV)   # fixture mode
+        return slate, ids
+
+    def _schedule_event_count(self, conn, slate):
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM oracle_play_events WHERE slate_run_id=%s "
+                    "AND event_type='schedule_retrieved'", (slate,))
+        n = cur.fetchone()[0]; cur.close(); return n
+
+    def _game_count(self, conn, slate):
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM oracle_game_analyses WHERE slate_run_id=%s", (slate,))
+        n = cur.fetchone()[0]; cur.close(); return n
+
+    @_requires_db
+    def test_ordinary_valid_replay_returns_same_ids(self, db):
+        slate, ids = self._committed_slate(db)
+        assert len(ids) == 2
+        ids2 = run_stage_2(db, slate, env=_ENABLED_ENV)   # replay
+        assert sorted(ids2) == sorted(ids)
+
+    @_requires_db
+    def test_replay_no_refetch_or_rewrite_lost_ack(self, db):
+        # Controlled fault injection: simulate a lost commit-acknowledgement by
+        # re-invoking Stage 2 on the committed slate. Reconciliation must NOT write
+        # a second snapshot event or duplicate game rows (no refetch/rewrite).
+        slate, ids = self._committed_slate(db)
+        assert self._schedule_event_count(db, slate) == 1
+        ids2 = run_stage_2(db, slate, env=_ENABLED_ENV)
+        assert sorted(ids2) == sorted(ids)
+        assert self._schedule_event_count(db, slate) == 1   # no new snapshot event
+        assert self._game_count(db, slate) == 2             # no duplicate rows
+
+    @_requires_db
+    def test_empty_slate_replay(self, db):
+        from datetime import datetime as _dt, timezone as _tz
+        slate = run_stage_1(db, _REPLAY_DATE, env=_ENABLED_ENV)
+        empty = _ls.Snapshot(mode=_ls.MODE_FIXTURE, source="oracle-fixture-schedule",
+                             requested_slate_date="2026-08-01",
+                             retrieved_at=_dt(2026, 8, 1, 12, 0, tzinfo=_tz.utc),
+                             included=(), excluded=(), empty=True)
+        with patch("backend.oracle.orchestrator.sched.retrieve", return_value=empty):
+            ids = run_stage_2(db, slate, env=_ENABLED_ENV)
+        assert ids == []
+        assert run_stage_2(db, slate, env=_ENABLED_ENV) == []   # replay empty
+
+    @_requires_db
+    def test_replay_after_later_stage_game_status_change(self, db):
+        # Downstream game_status transitions must NOT break replay: the digest uses
+        # the Stage-2 normalized status, not the mutable game_status.
+        slate, ids = self._committed_slate(db)
+        cur = db.cursor()
+        cur.execute("UPDATE oracle_game_analyses SET game_status='lineup_monitoring' WHERE game_run_id=%s", (ids[0],))
+        cur.close(); db.commit()
+        assert sorted(run_stage_2(db, slate, env=_ENABLED_ENV)) == sorted(ids)
+
+    @_requires_db
+    def test_replay_permits_later_append_only_supersession(self, db):
+        slate, ids = self._committed_slate(db)
+        cur = db.cursor()
+        cur.execute("SELECT source_namespace, sport_id, game_pk, scheduled_start_at, cutoff_offset, "
+                    "scheduled_cutoff_at, policy_version_id, window_identity "
+                    "FROM oracle_underlying_admission_window WHERE game_run_id=%s "
+                    "AND window_action='window_established'", (ids[0],))
+        r = cur.fetchone()
+        cur.execute("INSERT INTO oracle_underlying_admission_window "
+                    "(source_namespace, sport_id, game_pk, game_run_id, slate_run_id, scheduled_start_at, "
+                    " cutoff_offset, scheduled_cutoff_at, policy_version_id, window_identity, window_action, "
+                    " superseded_by_game_run_id, decision_at) "
+                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'window_superseded','NEWER-RUN',NOW())",
+                    (r[0], r[1], r[2], ids[0], slate, r[3], r[4], r[5], r[6], r[7]))
+        cur.close(); db.commit()
+        assert sorted(run_stage_2(db, slate, env=_ENABLED_ENV)) == sorted(ids)   # still reconciles
+
+    @_requires_db
+    def test_replay_fails_closed_on_content_mismatch(self, db):
+        slate, ids = self._committed_slate(db)
+        cur = db.cursor()
+        cur.execute("UPDATE oracle_game_analyses SET home_team='XXX' WHERE game_run_id=%s", (ids[0],))
+        cur.close(); db.commit()
+        with pytest.raises(Stage2ReplayInconsistencyError):
+            run_stage_2(db, slate, env=_ENABLED_ENV)
+
+    @_requires_db
+    def test_replay_fails_closed_on_extra_game_row(self, db):
+        slate, ids = self._committed_slate(db)
+        cur = db.cursor()
+        cur.execute("INSERT INTO oracle_game_analyses (game_run_id, slate_run_id, external_game_id, "
+                    "home_team, away_team, first_pitch_time, game_status) "
+                    "VALUES (%s,%s,'999999','AAA','BBB','2026-08-01T17:10:00+00:00','scheduled')",
+                    (slate + "-AAA-BBB-999999", slate))
+        cur.close(); db.commit()
+        with pytest.raises(Stage2ReplayInconsistencyError):
+            run_stage_2(db, slate, env=_ENABLED_ENV)
+
+    @_requires_db
+    def test_replay_fails_closed_on_missing_window_record(self, db):
+        slate, ids = self._committed_slate(db)
+        cur = db.cursor()
+        cur.execute("TRUNCATE oracle_underlying_admission_window")   # remove snapshot-bound windows
+        cur.close(); db.commit()
+        with pytest.raises(Stage2ReplayInconsistencyError):
+            run_stage_2(db, slate, env=_ENABLED_ENV)
+
+    @_requires_db
+    def test_replay_fails_closed_on_contradictory_window_identity(self, db):
+        slate, ids = self._committed_slate(db)
+        cur = db.cursor()
+        cur.execute("INSERT INTO oracle_underlying_admission_window "
+                    "(source_namespace, sport_id, game_pk, game_run_id, slate_run_id, scheduled_start_at, "
+                    " cutoff_offset, scheduled_cutoff_at, policy_version_id, window_identity, window_action, decision_at) "
+                    "VALUES ('fixture',1,'746484',%s,%s,'2026-07-25T17:10:00+00:00', INTERVAL '-15 minutes', "
+                    " '2026-07-25T16:55:00+00:00','MLB-A3-v1','S2W-FOREIGN','window_established',NOW())",
+                    (ids[0], slate))
+        cur.close(); db.commit()
+        with pytest.raises(Stage2ReplayInconsistencyError):
+            run_stage_2(db, slate, env=_ENABLED_ENV)

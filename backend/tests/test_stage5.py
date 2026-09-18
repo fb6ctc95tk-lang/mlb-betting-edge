@@ -44,6 +44,7 @@ from backend.oracle.stage5_pipeline import (
 from backend.oracle import orchestrator
 from backend.oracle.orchestrator import (
     KillSwitchHaltError,
+    Stage5BindingError,
     Stage5CutoffConflictError,
     _persist_scheduled_cutoff_with_replay,
     run_stage_5,
@@ -397,8 +398,13 @@ def test_policy_store_returns_active_mlb_policy():
         conn.close()
 
 
-def _seed_game_with_ecf(conn, slate_run_id, game_run_id, first_pitch, ecf_score=0.9):
-    """Insert slate, game, preliminary data, and an ECF result for one game."""
+def _seed_game_with_ecf(conn, slate_run_id, game_run_id, first_pitch, ecf_score=0.9,
+                        seed_window=True):
+    """Insert slate, game, preliminary data, and an ECF result for one game.
+
+    By default also seeds the frozen Stage-2 admission-timing binding that Stage 5
+    consumes; pass seed_window=False to exercise the fail-closed missing-binding path.
+    """
     cur = conn.cursor()
     cur.execute(
         "INSERT INTO oracle_slate_runs (slate_run_id, run_date, run_status, run_started_at) "
@@ -427,6 +433,19 @@ def _seed_game_with_ecf(conn, slate_run_id, game_run_id, first_pitch, ecf_score=
         (f"ECFR-{game_run_id}", game_run_id, f"DV-{game_run_id}", ecf_score,
          json.dumps({"data_completeness": 0.9, "data_freshness": 0.9, "data_payload_density": 0.8})),
     )
+    # Frozen Stage-2 admission-timing binding that Stage 5 consumes/reconciles
+    # (PM-1269 §2): offset -15m ⇒ cutoff = first_pitch - 15m.
+    if seed_window:
+        cur.execute(
+            "INSERT INTO oracle_underlying_admission_window "
+            "(source_namespace, sport_id, game_pk, game_run_id, slate_run_id, "
+            " scheduled_start_at, cutoff_offset, scheduled_cutoff_at, policy_version_id, "
+            " window_identity, window_action, retrieved_at, decision_at) "
+            "VALUES ('fixture', 1, '746484', %s, %s, %s, INTERVAL '-15 minutes', %s, "
+            " 'MLB-A3-v1', %s, 'window_established', NOW(), NOW())",
+            (game_run_id, slate_run_id, first_pitch, first_pitch - timedelta(minutes=15),
+             f"S2W-test-{game_run_id}"),
+        )
     cur.close()
 
 
@@ -545,3 +564,52 @@ def test_run_stage_5_cutoff_conflict_rolls_back_with_no_partial_result():
     finally:
         conn.rollback()
         conn.close()
+
+
+@_db
+def test_run_stage_5_fails_closed_without_window_binding():
+    """Stage 5 consumes the frozen Stage-2 binding; a missing binding fails closed
+    and never silently recomputes a cutoff (PM-1269 §2)."""
+    import psycopg2
+    slate = "ORACLE-20260908-720"
+    game = f"{slate}-BOS-NYY"
+    first_pitch = datetime(2026, 9, 9, 23, 5, 0, tzinfo=timezone.utc)
+    conn = psycopg2.connect(_TEST_DB_URL)
+    conn.autocommit = False
+    try:
+        # Seed WITHOUT the authoritative window binding (append-only → cannot delete).
+        _seed_game_with_ecf(conn, slate, game, first_pitch, seed_window=False)
+        with pytest.raises(Stage5BindingError):
+            run_stage_5(conn, slate, [game], env=_ENABLED_ENV)
+        conn.rollback()
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM oracle_scheduled_cutoffs WHERE game_run_id=%s", (game,))
+        assert cur.fetchone()[0] == 0   # nothing persisted on the fail-closed path
+        cur.close()
+    finally:
+        conn.rollback(); conn.close()
+
+
+@_db
+def test_run_stage_5_uses_frozen_binding_not_later_active_policy():
+    """Active-policy drift after Stage 2 must not change the run's cutoff: Stage 5
+    consumes the frozen binding's cutoff/policy version (PM-1269 §2, case A5)."""
+    import psycopg2
+    slate = "ORACLE-20260908-721"
+    game = f"{slate}-BOS-NYY"
+    first_pitch = datetime(2026, 9, 9, 23, 5, 0, tzinfo=timezone.utc)
+    conn = psycopg2.connect(_TEST_DB_URL)
+    conn.autocommit = False
+    try:
+        _seed_game_with_ecf(conn, slate, game, first_pitch)   # frozen offset -15m
+        # The frozen binding (not any later active policy) governs the cutoff.
+        run_stage_5(conn, slate, [game], env=_ENABLED_ENV)
+        cur = conn.cursor()
+        cur.execute("SELECT scheduled_cutoff_at, policy_version_id FROM oracle_scheduled_cutoffs "
+                    "WHERE game_run_id=%s", (game,))
+        cutoff_at, policy_version = cur.fetchone()
+        cur.close()
+        assert cutoff_at == first_pitch - timedelta(minutes=15)   # frozen offset, not a later policy
+        assert policy_version == "MLB-A3-v1"
+    finally:
+        conn.rollback(); conn.close()

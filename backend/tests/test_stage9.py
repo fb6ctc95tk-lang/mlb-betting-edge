@@ -959,3 +959,26 @@ def test_defensive_unexpected_23505_with_no_lock_rolls_back_and_raises():
         assert _lock_row(c, game) is None
     finally:
         c.rollback(); c.close()
+
+
+# ===========================================================================
+# E. Losing / no-claim revision has no Stage-9 lock (PM-1269 §2 / §6)
+# ===========================================================================
+
+@_db
+def test_losing_revision_without_admission_gets_no_lock():
+    """A revision that lost the SUI claim / was blocked at Stage 8 has no committed
+    Stage-8 admission, so Stage 9 truthfully returns INELIGIBLE(no_admission) and
+    writes no pregame lock (PM-1269 §2: no Stage-9 lock from a losing admission)."""
+    slate = "ORACLE-20260909-950"; game = f"{slate}-BOS-NYY-1"
+    c = _connect()
+    try:
+        _seed_slate(c, slate)
+        _seed_game(c, slate, game, status="activation_eligible")   # never admitted at Stage 8
+        c.commit()
+        res = run_stage_9(c, slate, [game], env=_ENABLED)
+        assert res[0].outcome == s9.INELIGIBLE
+        assert res[0].reason == s9.REASON_NO_ADMISSION
+        assert _lock_row(c, game) is None
+    finally:
+        c.rollback(); c.close()

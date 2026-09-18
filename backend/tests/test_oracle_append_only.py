@@ -417,3 +417,62 @@ def test_platform_tables_unaffected(conn):
     assert found == set(platform_tables), (
         f"Missing platform tables: {set(platform_tables) - found}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Migration 016 — append-only enforcement on the underlying-admission tables
+# (PM-1265→PM-1269 / PM-1271)
+# ---------------------------------------------------------------------------
+
+def test_admission_claim_update_and_delete_rejected(conn, seed_slate_run):
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO oracle_underlying_admission_claim "
+        "(source_namespace, sport_id, game_pk, game_run_id, slate_run_id) "
+        "VALUES ('fixture', 1, '990101', 'G-AO-CLAIM', %s) RETURNING id",
+        (seed_slate_run,),
+    )
+    row_id = cur.fetchone()[0]
+    cur.close()
+    try:
+        with pytest.raises(psycopg2.Error):
+            c = conn.cursor()
+            c.execute("UPDATE oracle_underlying_admission_claim SET game_pk='x' WHERE id=%s", (row_id,))
+            c.close()
+        with pytest.raises(psycopg2.Error):
+            c = conn.cursor()
+            c.execute("DELETE FROM oracle_underlying_admission_claim WHERE id=%s", (row_id,))
+            c.close()
+    finally:
+        c = conn.cursor()
+        c.execute("TRUNCATE oracle_underlying_admission_claim")
+        c.close()
+
+
+def test_admission_window_update_and_delete_rejected(conn, seed_slate_run):
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO oracle_underlying_admission_window "
+        "(source_namespace, sport_id, game_pk, game_run_id, slate_run_id, "
+        " scheduled_start_at, cutoff_offset, scheduled_cutoff_at, policy_version_id, "
+        " window_identity, window_action, decision_at) "
+        "VALUES ('fixture', 1, '990102', 'G-AO-WIN', %s, "
+        " NOW(), INTERVAL '-15 minutes', NOW(), 'MLB-A3-v1', 'S2W-ao', 'window_established', NOW()) "
+        "RETURNING id",
+        (seed_slate_run,),
+    )
+    row_id = cur.fetchone()[0]
+    cur.close()
+    try:
+        with pytest.raises(psycopg2.Error):
+            c = conn.cursor()
+            c.execute("UPDATE oracle_underlying_admission_window SET window_action='window_superseded' WHERE id=%s", (row_id,))
+            c.close()
+        with pytest.raises(psycopg2.Error):
+            c = conn.cursor()
+            c.execute("DELETE FROM oracle_underlying_admission_window WHERE id=%s", (row_id,))
+            c.close()
+    finally:
+        c = conn.cursor()
+        c.execute("TRUNCATE oracle_underlying_admission_window")
+        c.close()

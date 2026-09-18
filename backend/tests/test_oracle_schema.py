@@ -54,6 +54,16 @@ ORACLE_TABLES = [
     "oracle_stage9_pregame_lock",
     # Market-Odds Observation (migration 015)
     "oracle_market_odds_observations",
+    # Underlying-game admission claim + window (migration 016)
+    "oracle_underlying_admission_claim",
+    "oracle_underlying_admission_window",
+]
+
+# Underlying-game admission tables (migration 016) — registered explicitly to
+# keep the approved Oracle-table registry complete (PM-1265→PM-1269; PM-1271).
+STAGE2_ADMISSION_TABLES = [
+    "oracle_underlying_admission_claim",
+    "oracle_underlying_admission_window",
 ]
 
 # Stage 6 (migration 010) table — registered explicitly to keep the approved
@@ -1080,4 +1090,75 @@ def test_migration_013_is_rerunnable(conn):
         sql = fh.read()
     cur = conn.cursor()
     cur.execute(sql)  # must not error on re-application
+    cur.close()
+
+
+# ---------------------------------------------------------------------------
+# G. Underlying-game admission tables (migration 016; PM-1265→PM-1269 / PM-1271)
+# ---------------------------------------------------------------------------
+
+def test_uac_unique_sui_rejects_duplicate(conn):
+    """oracle_underlying_admission_claim enforces UNIQUE(source_namespace, sport_id, game_pk) (D-4)."""
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO oracle_underlying_admission_claim "
+        "(source_namespace, sport_id, game_pk, game_run_id, slate_run_id) "
+        "VALUES ('mlb-statsapi', 1, '999001', 'G-A', 'ORACLE-20260101-A')"
+    )
+    with pytest.raises(psycopg2.errors.UniqueViolation):
+        cur.execute(
+            "INSERT INTO oracle_underlying_admission_claim "
+            "(source_namespace, sport_id, game_pk, game_run_id, slate_run_id) "
+            "VALUES ('mlb-statsapi', 1, '999001', 'G-B', 'ORACLE-20260101-B')"
+        )
+    cur.close()
+
+
+def test_uac_distinct_namespace_not_a_conflict(conn):
+    """Fixture and live namespaces never collide for the same gamePk."""
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO oracle_underlying_admission_claim "
+        "(source_namespace, sport_id, game_pk, game_run_id, slate_run_id) "
+        "VALUES ('fixture', 1, '999002', 'G-F', 'ORACLE-20260101-F')"
+    )
+    cur.execute(
+        "INSERT INTO oracle_underlying_admission_claim "
+        "(source_namespace, sport_id, game_pk, game_run_id, slate_run_id) "
+        "VALUES ('mlb-statsapi', 1, '999002', 'G-L', 'ORACLE-20260101-L')"
+    )
+    cur.close()
+
+
+def test_uaw_window_action_check_rejects_unknown(conn):
+    """oracle_underlying_admission_window.window_action CHECK rejects unknown actions."""
+    with pytest.raises(psycopg2.errors.CheckViolation):
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO oracle_underlying_admission_window "
+            "(source_namespace, sport_id, game_pk, game_run_id, slate_run_id, "
+            " scheduled_start_at, cutoff_offset, scheduled_cutoff_at, policy_version_id, "
+            " window_identity, window_action, decision_at) "
+            "VALUES ('fixture', 1, '999003', 'G-W', 'ORACLE-20260101-W', "
+            " NOW(), INTERVAL '-15 minutes', NOW(), 'MLB-A3-v1', 'S2W-x', 'bogus_action', NOW())"
+        )
+        cur.close()
+
+
+def test_uaw_accepts_all_defined_actions(conn):
+    cur = conn.cursor()
+    for i, action in enumerate([
+        "window_established", "window_superseded",
+        "window_blocked_prior_expired", "window_blocked_prior_admission",
+        "window_blocked_stale_observation",
+    ]):
+        cur.execute(
+            "INSERT INTO oracle_underlying_admission_window "
+            "(source_namespace, sport_id, game_pk, game_run_id, slate_run_id, "
+            " scheduled_start_at, cutoff_offset, scheduled_cutoff_at, policy_version_id, "
+            " window_identity, window_action, decision_at) "
+            "VALUES ('fixture', 1, %s, %s, 'ORACLE-20260101-WA', "
+            " NOW(), INTERVAL '-15 minutes', NOW(), 'MLB-A3-v1', %s, %s, NOW())",
+            (f"99901{i}", f"G-WA-{i}", f"S2W-wa-{i}", action),
+        )
     cur.close()

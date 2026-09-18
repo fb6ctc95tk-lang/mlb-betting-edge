@@ -20,6 +20,7 @@ betting readiness; it binds only the frozen Stage 7 evidence and revalidates no 
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import threading
@@ -125,6 +126,31 @@ def _connect():
     return conn
 
 
+@pytest.fixture(autouse=True)
+def _isolate_sui_tables():
+    """Per-test isolation for the SUI-keyed admission tables (PM-1271).
+
+    The UNIQUE(SUI) admission claim is keyed by (namespace, sport, gamePk) — not
+    by slate — and run_stage_8 commits it. Because these tests reuse gamePks
+    across slates, committed claims/windows from one test would otherwise leak
+    into the next. Truncating the two migration-016 tables before each test
+    restores cross-test isolation without weakening any production constraint.
+    """
+    if not _TEST_DB_URL:
+        yield
+        return
+    conn = _connect()
+    try:
+        conn.autocommit = True
+        cur = conn.cursor()
+        cur.execute("TRUNCATE oracle_underlying_admission_claim, "
+                    "oracle_underlying_admission_window")
+        cur.close()
+    finally:
+        conn.close()
+    yield
+
+
 def _seed_slate(conn, slate, run_status="analysis_in_progress"):
     cur = conn.cursor()
     cur.execute(
@@ -146,8 +172,70 @@ def _seed_game(conn, slate, game, status="final_analysis"):
     cur.close()
 
 
-def _seed_frozen7(conn, slate, game, identity, cutoff_at, s5id=None):
-    """Insert a frozen Stage-7 record directly (to make a game Stage-8-eligible)."""
+def _game_pk_of(game):
+    """Derive a per-game_run_id gamePk for the SUI. Digit trailing tokens are used
+    verbatim (so two ids ending in the same number share a SUI, as D-4 tests
+    intend); non-numeric suffixes get a deterministic distinct value so unrelated
+    games never collapse to one SUI."""
+    tail = game.rsplit("-", 1)[-1]
+    if tail.isdigit():
+        return tail
+    return str(int(hashlib.sha1(game.encode()).hexdigest()[:8], 16))
+
+
+def _seed_window(conn, slate, game, cutoff_at,
+                 action="window_established", namespace="fixture", superseded_by=None):
+    """Insert an admission-window ledger row (PM-1269). Default: an authoritative
+    established window, making the run Stage-8-eligible under the SUI guard."""
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO oracle_underlying_admission_window
+            (source_namespace, sport_id, game_pk, game_run_id, slate_run_id,
+             scheduled_start_at, cutoff_offset, scheduled_cutoff_at, policy_version_id,
+             window_identity, window_action, superseded_by_game_run_id, retrieved_at, decision_at)
+        VALUES (%s, 1, %s, %s, %s, %s, INTERVAL '-15 minutes', %s, 'MLB-A3-v1',
+                %s, %s, %s, NOW(), NOW())
+        """,
+        (namespace, _game_pk_of(game), game, slate,
+         cutoff_at, cutoff_at, f"S2W-test-{game}", action, superseded_by),
+    )
+    cur.close()
+
+
+def _seed_claim(conn, slate, game, namespace="fixture"):
+    """Insert a durable SUI admission claim (D-4) for the game's underlying identity."""
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO oracle_underlying_admission_claim
+            (source_namespace, sport_id, game_pk, game_run_id, slate_run_id)
+        VALUES (%s, 1, %s, %s, %s)
+        ON CONFLICT ON CONSTRAINT uq_oracle_uac_sui DO NOTHING
+        """,
+        (namespace, _game_pk_of(game), game, slate),
+    )
+    cur.close()
+
+
+def _claim_exists(conn, game, namespace="fixture"):
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT 1 FROM oracle_underlying_admission_claim "
+        "WHERE source_namespace=%s AND sport_id=1 AND game_pk=%s",
+        (namespace, _game_pk_of(game)),
+    )
+    row = cur.fetchone()
+    cur.close()
+    return row is not None
+
+
+def _seed_frozen7(conn, slate, game, identity, cutoff_at, s5id=None, seed_window=True):
+    """Insert a frozen Stage-7 record directly (to make a game Stage-8-eligible).
+
+    Also seeds an authoritative established admission window by default (PM-1269):
+    Stage 8 now requires the run to be the current authoritative window for its SUI.
+    """
     cur = conn.cursor()
     cur.execute(
         """
@@ -161,6 +249,8 @@ def _seed_frozen7(conn, slate, game, identity, cutoff_at, s5id=None):
         (game, slate, s5id or f"S5R-{game}", cutoff_at, _aware(2026, 9, 9, 22, 0), identity),
     )
     cur.close()
+    if seed_window:
+        _seed_window(conn, slate, game, cutoff_at)
 
 
 def _seed_admission(conn, slate, game, stage7_identity, cutoff_at, activation_identity=None):
@@ -812,7 +902,14 @@ def _run_cutoff_contention(slate, game, cutoff_at, post_wait_clock):
     """Shared driver: prove the waiter blocked pre-cutoff, then advance an injected clock to
     post_wait_clock BEFORE releasing the holder, and return the waiter's outcome. The waiter's
     fresh decision_time is sampled only AFTER acquiring the lock (post-wait), so it uses the
-    advanced clock. Returns (result, errors)."""
+    advanced clock. Returns (result, errors).
+
+    CONTROLLED TIME INJECTION (not a real DB clock): the authoritative gate now
+    samples _db_clock_now() (clock_timestamp) after the locks; here that sample
+    point is substituted with a mutable clock to exercise the post-wait gate
+    deterministically. This proves post-wait sampling; it does NOT prove the
+    production non-caller-controlled DB-time property (that is inherent in
+    _db_clock_now using clock_timestamp())."""
     setup = _connect()
     try:
         _seed_slate(setup, slate)
@@ -825,7 +922,7 @@ def _run_cutoff_contention(slate, game, cutoff_at, post_wait_clock):
     holder = _connect(); observer = _connect_autocommit()
     results, errors, pids = {}, {}, {}
     tw = None
-    with patch("backend.oracle.orchestrator._now_utc", new=clk):
+    with patch("backend.oracle.orchestrator._db_clock_now", new=lambda conn: clk.value):
         try:
             holder_pid = _backend_pid(holder)
             _hold_slate_lock(holder, slate)
@@ -986,3 +1083,144 @@ def test_defensive_unexpected_23505_with_no_admission_rolls_back_and_raises():
         assert _admission_row(c, game) is None
     finally:
         c.rollback(); c.close()
+
+
+# ===========================================================================
+# E. Cross-revision admission invariants D-4 / D-5 (PM-1265→PM-1269; PM-1271)
+# ===========================================================================
+
+@_db
+def test_d4_prior_claim_blocks_second_admission():
+    """D-4: once a SUI is claimed, a later revision (same gamePk) cannot admit."""
+    s_a = "ORACLE-20260909-840"; s_b = "ORACLE-20260909-841"
+    game_a = f"{s_a}-BOS-NYY-5"; game_b = f"{s_b}-BOS-NYY-5"   # same gamePk 5 → same SUI
+    c = _connect()
+    try:
+        _seed_slate(c, s_a); _seed_slate(c, s_b)
+        _seed_claim(c, s_a, game_a)                    # SUI already officially admitted
+        _seed_game(c, s_b, game_b)
+        _seed_frozen7(c, s_b, game_b, "S7F-b", _future_cutoff())
+        c.commit()
+        res = run_stage_8(c, s_b, [game_b], env=_ENABLED)
+        assert res[0].outcome == s8.INELIGIBLE
+        assert res[0].reason == "already_admitted_for_underlying_game"
+        assert _admission_row(c, game_b) is None
+        assert _slate_status(c, s_b) == "analysis_in_progress"
+    finally:
+        c.rollback(); c.close()
+
+
+@_db
+def test_d5_expired_prior_window_blocks_admission():
+    """D-5: a run recorded as window_blocked_prior_expired cannot admit."""
+    slate = "ORACLE-20260909-842"; game = f"{slate}-BOS-NYY-1"
+    c = _connect()
+    try:
+        _seed_slate(c, slate); _seed_game(c, slate, game)
+        _seed_frozen7(c, slate, game, "S7F-a", _future_cutoff(), seed_window=False)
+        _seed_window(c, slate, game, _future_cutoff(),
+                     action="window_blocked_prior_expired")
+        c.commit()
+        res = run_stage_8(c, slate, [game], env=_ENABLED)
+        assert res[0].outcome == s8.INELIGIBLE
+        assert res[0].reason == "prior_window_expired_no_reopen"
+        assert _admission_row(c, game) is None
+    finally:
+        c.rollback(); c.close()
+
+
+@_db
+def test_superseded_window_blocks_admission():
+    slate = "ORACLE-20260909-843"; game = f"{slate}-BOS-NYY-1"
+    c = _connect()
+    try:
+        _seed_slate(c, slate); _seed_game(c, slate, game)
+        _seed_frozen7(c, slate, game, "S7F-a", _future_cutoff(), seed_window=False)
+        _seed_window(c, slate, game, _future_cutoff(),
+                     action="window_superseded", superseded_by=f"{slate}-BOS-NYY-2")
+        c.commit()
+        res = run_stage_8(c, slate, [game], env=_ENABLED)
+        assert res[0].outcome == s8.INELIGIBLE
+        assert res[0].reason == "superseded_by_newer_revision"
+        assert _admission_row(c, game) is None
+    finally:
+        c.rollback(); c.close()
+
+
+@_db
+def test_not_authoritative_when_no_window():
+    """A game with a frozen Stage-7 record but no admission window is not authoritative."""
+    slate = "ORACLE-20260909-844"; game = f"{slate}-BOS-NYY-1"
+    c = _connect()
+    try:
+        _seed_slate(c, slate); _seed_game(c, slate, game)
+        _seed_frozen7(c, slate, game, "S7F-a", _future_cutoff(), seed_window=False)
+        c.commit()
+        res = run_stage_8(c, slate, [game], env=_ENABLED)
+        assert res[0].outcome == s8.INELIGIBLE
+        assert res[0].reason == "not_authoritative_window"
+        assert _admission_row(c, game) is None
+    finally:
+        c.rollback(); c.close()
+
+
+@_db
+def test_admission_writes_durable_claim():
+    """A successful first admission writes both the admission row and the SUI claim (all-or-none)."""
+    slate = "ORACLE-20260909-845"; game = f"{slate}-BOS-NYY-1"
+    c = _connect()
+    try:
+        _seed_slate(c, slate); _seed_game(c, slate, game)
+        _seed_frozen7(c, slate, game, "S7F-a", _future_cutoff())
+        c.commit()
+        res = run_stage_8(c, slate, [game], env=_ENABLED)
+        assert res[0].outcome == s8.WINDOW_OPENED
+        assert _admission_row(c, game) is not None
+        assert _claim_exists(c, game) is True
+    finally:
+        c.rollback(); c.close()
+
+
+@_db
+def test_claim_conflict_concurrent_leaves_one_admission_and_no_losing_row():
+    """Two revisions of the SAME underlying game admit concurrently on independent
+    connections: exactly one wins the durable UNIQUE(SUI) claim; the loser retains
+    NO admission row (all-or-none rollback, PM-1269 §2)."""
+    s_a = "ORACLE-20260909-846"; s_b = "ORACLE-20260909-847"
+    game_a = f"{s_a}-BOS-NYY-9"; game_b = f"{s_b}-BOS-NYY-9"   # same gamePk 9 → same SUI
+    setup = _connect()
+    try:
+        _seed_slate(setup, s_a); _seed_slate(setup, s_b)
+        _seed_game(setup, s_a, game_a); _seed_game(setup, s_b, game_b)
+        _seed_frozen7(setup, s_a, game_a, "S7F-a", _future_cutoff())
+        _seed_frozen7(setup, s_b, game_b, "S7F-b", _future_cutoff())
+        setup.commit()
+    finally:
+        setup.close()
+
+    barrier = threading.Barrier(2)
+    outcomes = {}
+
+    def _admit(tag, slate, game):
+        c = _connect()
+        try:
+            barrier.wait(timeout=10)
+            res = run_stage_8(c, slate, [game], env=_ENABLED)
+            outcomes[tag] = res[0].outcome
+        except Exception as exc:  # pragma: no cover - defensive
+            outcomes[tag] = f"ERROR:{type(exc).__name__}"
+        finally:
+            c.close()
+
+    t1 = threading.Thread(target=_admit, args=("a", s_a, game_a))
+    t2 = threading.Thread(target=_admit, args=("b", s_b, game_b))
+    t1.start(); t2.start(); t1.join(); t2.join()
+
+    verify = _connect()
+    try:
+        opened = [k for k, v in outcomes.items() if v == s8.WINDOW_OPENED]
+        assert len(opened) == 1, f"expected exactly one admission, got {outcomes}"
+        loser_game = game_b if opened == ["a"] else game_a
+        assert _admission_row(verify, loser_game) is None   # no losing admission row
+    finally:
+        verify.rollback(); verify.close()

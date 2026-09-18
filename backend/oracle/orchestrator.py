@@ -29,6 +29,8 @@ from backend.oracle.fixtures import (
     load_phase1_fixtures,
     validate_fixture_record,
 )
+from backend.oracle import live_schedule as sched
+from backend.oracle import underlying_identity as ui
 from backend.oracle.identifier_manager import (
     generate_game_run_id,
     generate_slate_run_id,
@@ -267,91 +269,551 @@ def run_stage_1(
 
 
 # ---------------------------------------------------------------------------
-# Stage 2 — Schedule Retrieval (fixture-based; no live provider)
+# Stage 2 — Live-schedule / fixture retrieval + admission-window persistence
+# (PM-1263 → PM-1269; implemented under PM-1271)
 # ---------------------------------------------------------------------------
+
+class Stage2ScheduleError(OrchestratorError):
+    """Raised when Stage 2 cannot persist a coherent authoritative unit
+    (fail-closed; no partial history, no silent fixture fallback)."""
+
+
+class Stage2ReplayInconsistencyError(OrchestratorError):
+    """Raised when a completed Stage-2 slate has inconsistent authoritative
+    history on replay (fail-closed; no repair is performed)."""
+
+
+def _db_clock_now(conn: object) -> datetime:
+    """Authoritative decision instant from the DATABASE clock (PM-1269 §1).
+
+    clock_timestamp() re-reads the OS clock at statement execution, so a value
+    sampled AFTER the required locks are held is never the stale
+    transaction/statement-start instant that now()/transaction_timestamp()/
+    statement_timestamp() would return after a lock wait. Non-caller-supplied.
+    """
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT clock_timestamp()")
+        row = cur.fetchone()
+    finally:
+        cur.close()
+    if row is None or row[0] is None:
+        raise Stage2ScheduleError("database clock unavailable")
+    return row[0]
+
+
+def _acquire_sui_lock(conn: object, sui: tuple) -> None:
+    """Transaction-scoped advisory lock keyed on the SUI (serialization only).
+
+    Collisions may serialize unrelated SUIs (harmless); identity/authority is
+    the durable UNIQUE(SUI) claim and the append-only window ledger, never the
+    lock key (PM-1269 §3.3).
+    """
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s)::bigint)",
+                    (ui.advisory_lock_key(sui),))
+        cur.fetchone()
+    finally:
+        cur.close()
+
+
+def _fetch_admission_claim(conn: object, sui: tuple):
+    """Return the winning game_run_id if a SUI admission claim exists, else None (D-4)."""
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT game_run_id FROM oracle_underlying_admission_claim
+            WHERE source_namespace = %s AND sport_id = %s AND game_pk = %s
+            """,
+            (sui[0], sui[1], sui[2]),
+        )
+        row = cur.fetchone()
+    finally:
+        cur.close()
+    return row[0] if row else None
+
+
+def _insert_admission_claim(conn: object, sui: tuple, game_run_id: str, slate_run_id: str) -> None:
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            INSERT INTO oracle_underlying_admission_claim
+                (source_namespace, sport_id, game_pk, game_run_id, slate_run_id)
+            VALUES (%s, %s, %s, %s, %s)
+            """,
+            (sui[0], sui[1], sui[2], game_run_id, slate_run_id),
+        )
+    finally:
+        cur.close()
+
+
+def _fetch_window_rows(conn: object, sui: tuple):
+    """Return all window ledger rows for a SUI, oldest first:
+    (id, game_run_id, scheduled_cutoff_at, window_action,
+     superseded_by_game_run_id, retrieved_at)."""
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT id, game_run_id, scheduled_cutoff_at, window_action,
+                   superseded_by_game_run_id, retrieved_at
+            FROM oracle_underlying_admission_window
+            WHERE source_namespace = %s AND sport_id = %s AND game_pk = %s
+            ORDER BY id ASC
+            """,
+            (sui[0], sui[1], sui[2]),
+        )
+        return cur.fetchall()
+    finally:
+        cur.close()
+
+
+def _authoritative_window(rows):
+    """Return the current authoritative window row (latest window_established not
+    later marked superseded), or None. `rows` are oldest-first."""
+    superseded_runs = {r[1] for r in rows if r[3] == ui.WINDOW_ACTION_SUPERSEDED}
+    authoritative = None
+    for r in rows:
+        if r[3] == ui.WINDOW_ACTION_ESTABLISHED and r[1] not in superseded_runs:
+            authoritative = r
+    return authoritative
+
+
+def _insert_window_row(
+    conn: object, sui: tuple, game_run_id: str, slate_run_id: str,
+    scheduled_start_at: object, cutoff_offset: object, scheduled_cutoff_at: object,
+    policy_version_id: str, window_identity: str, window_action: str,
+    retrieved_at: object, decision_at: object, superseded_by_game_run_id: str | None = None,
+) -> None:
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            INSERT INTO oracle_underlying_admission_window
+                (source_namespace, sport_id, game_pk, game_run_id, slate_run_id,
+                 scheduled_start_at, cutoff_offset, scheduled_cutoff_at, policy_version_id,
+                 window_identity, window_action, superseded_by_game_run_id,
+                 retrieved_at, decision_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            (sui[0], sui[1], sui[2], game_run_id, slate_run_id,
+             scheduled_start_at, cutoff_offset, scheduled_cutoff_at, policy_version_id,
+             window_identity, window_action, superseded_by_game_run_id,
+             retrieved_at, decision_at),
+        )
+    finally:
+        cur.close()
+
+
+def _fetch_window_binding(conn: object, game_run_id: str):
+    """Return the frozen window_established binding for a run, or None:
+    (source_namespace, sport_id, game_pk, scheduled_start_at, cutoff_offset,
+     scheduled_cutoff_at, policy_version_id, window_identity)."""
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT source_namespace, sport_id, game_pk, scheduled_start_at,
+                   cutoff_offset, scheduled_cutoff_at, policy_version_id, window_identity
+            FROM oracle_underlying_admission_window
+            WHERE game_run_id = %s AND window_action = %s
+            ORDER BY id ASC LIMIT 1
+            """,
+            (game_run_id, ui.WINDOW_ACTION_ESTABLISHED),
+        )
+        return cur.fetchone()
+    finally:
+        cur.close()
+
+
+def _fetch_run_window_status(conn: object, game_run_id: str):
+    """Return (latest_window_action, is_superseded, sui) for a run, or (None, False, None)."""
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT window_action, source_namespace, sport_id, game_pk
+            FROM oracle_underlying_admission_window
+            WHERE game_run_id = %s
+            ORDER BY id DESC
+            """,
+            (game_run_id,),
+        )
+        rows = cur.fetchall()
+    finally:
+        cur.close()
+    if not rows:
+        return (None, False, None)
+    latest_action = rows[0][0]
+    is_superseded = any(r[0] == ui.WINDOW_ACTION_SUPERSEDED for r in rows)
+    sui = (rows[0][1], rows[0][2], rows[0][3])
+    return (latest_action, is_superseded, sui)
+
+
+def _read_slate_status_and_date(conn: object, slate_run_id: str):
+    """Return (run_status, run_date) for a slate, or (None, None)."""
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "SELECT run_status, run_date FROM oracle_slate_runs WHERE slate_run_id = %s",
+            (slate_run_id,),
+        )
+        row = cur.fetchone()
+    finally:
+        cur.close()
+    return (row[0], row[1]) if row else (None, None)
+
+
+def _fetch_stage2_game_run_ids(conn: object, slate_run_id: str) -> list[str]:
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "SELECT game_run_id FROM oracle_game_analyses WHERE slate_run_id = %s ORDER BY game_run_id",
+            (slate_run_id,),
+        )
+        rows = cur.fetchall()
+    finally:
+        cur.close()
+    return [r[0] for r in rows]
+
+
+def _fetch_schedule_retrieved_payload(conn: object, slate_run_id: str):
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT event_payload FROM oracle_play_events
+            WHERE slate_run_id = %s AND event_type = 'schedule_retrieved'
+            ORDER BY event_id ASC LIMIT 1
+            """,
+            (slate_run_id,),
+        )
+        row = cur.fetchone()
+    finally:
+        cur.close()
+    if row is None:
+        return None
+    payload = row[0]
+    if isinstance(payload, str):
+        payload = json.loads(payload)
+    return payload
+
+
+# Slate states in which a completed Stage 2 may legitimately be replayed.
+_VALID_POST_STAGE2_SLATE_STATES = frozenset({
+    "analysis_in_progress", "activation_window_open", "pregame_locked",
+    "settled", "partial_void", "settlement_pending_retry",
+})
+
+
+def _fetch_game_content(conn: object, game_run_id: str):
+    """Return (external_game_id, home_team, away_team, first_pitch_time, game_status) or None.
+
+    home_team, away_team, first_pitch_time and external_game_id are immutable after Stage 2
+    (only game_status transitions downstream), so they are authoritative content for the
+    replay digest recomputation."""
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "SELECT external_game_id, home_team, away_team, first_pitch_time, game_status "
+            "FROM oracle_game_analyses WHERE game_run_id = %s",
+            (game_run_id,),
+        )
+        return cur.fetchone()
+    finally:
+        cur.close()
+
+
+def _fetch_window_rows_for_run(conn: object, game_run_id: str):
+    """Return all window ledger rows for a run (oldest first):
+    (window_identity, window_action, scheduled_start_at, cutoff_offset,
+     scheduled_cutoff_at, policy_version_id, source_namespace, sport_id, game_pk)."""
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "SELECT window_identity, window_action, scheduled_start_at, cutoff_offset, "
+            "scheduled_cutoff_at, policy_version_id, source_namespace, sport_id, game_pk "
+            "FROM oracle_underlying_admission_window WHERE game_run_id = %s ORDER BY id ASC",
+            (game_run_id,),
+        )
+        return cur.fetchall()
+    finally:
+        cur.close()
+
+
+def _reconcile_completed_stage2(conn: object, slate_run_id: str) -> list[str]:
+    """Existence-first exact replay reconciliation of a committed Stage 2 (PM-1269 §5).
+
+    Validates the ORIGINAL snapshot against authoritative persisted state:
+      - exact included game-run set == persisted Stage-2 rows (no missing/extra/duplicate);
+      - each snapshot game maps to a persisted game row whose immutable content
+        (SUI gamePk, teams, scheduled start) RECOMPUTES the recorded content digest;
+      - the recorded window identity derives from (game_run_id, recomputed digest);
+      - exactly one snapshot-bound window record (window_identity + recorded action) exists,
+        its frozen binding (start, offset, cutoff, policy, SUI) is internally consistent and
+        matches the snapshot, and no foreign/contradictory window record exists for the run;
+      - the slate lifecycle state is a permitted post-Stage-2 state.
+
+    Stage-2 INCLUSION is reconciled (game rows + window records) — NOT Stage-8 admission.
+    Legitimate later append-only supersession (a window_superseded row sharing the same window
+    identity) is permitted and never mistaken for corruption. No provider refetch, history
+    rewrite, or lifecycle regression is performed; inconsistent history fails closed with no
+    repair.
+    """
+    payload = _fetch_schedule_retrieved_payload(conn, slate_run_id)
+    if payload is None:
+        raise Stage2ReplayInconsistencyError(
+            f"slate {slate_run_id} advanced but has no schedule_retrieved snapshot")
+
+    status, _ = _read_slate_status_and_date(conn, slate_run_id)
+    if status not in _VALID_POST_STAGE2_SLATE_STATES:
+        raise Stage2ReplayInconsistencyError(
+            f"slate {slate_run_id} in unexpected lifecycle state {status!r} for replay")
+
+    included = list(payload.get("included_game_run_ids", []))
+    games = list(payload.get("games", []))
+    persisted = _fetch_stage2_game_run_ids(conn, slate_run_id)
+
+    if len(set(included)) != len(included):
+        raise Stage2ReplayInconsistencyError(
+            f"slate {slate_run_id} snapshot has duplicate included game_run_ids")
+    if len(set(persisted)) != len(persisted):
+        raise Stage2ReplayInconsistencyError(
+            f"slate {slate_run_id} has duplicate persisted game rows")
+    if set(included) != set(persisted):
+        raise Stage2ReplayInconsistencyError(
+            f"slate {slate_run_id} snapshot/rows mismatch: "
+            f"included={sorted(set(included))} persisted={sorted(set(persisted))}")
+    if {g.get("game_run_id") for g in games} != set(included):
+        raise Stage2ReplayInconsistencyError(
+            f"slate {slate_run_id} snapshot games list does not match included ids")
+
+    if not included:
+        logger.info("Stage 2 replay: %s already complete (empty slate); no refetch", slate_run_id)
+        return []
+
+    for g in games:
+        grid = g["game_run_id"]
+        content = _fetch_game_content(conn, grid)
+        if content is None:
+            raise Stage2ReplayInconsistencyError(f"missing persisted game row for {grid}")
+        ext_id, home, away, first_pitch, _game_status = content
+
+        parts = str(g.get("sui", "")).split(":")
+        if len(parts) != 3 or not parts[1].isdigit():
+            raise Stage2ReplayInconsistencyError(f"unparseable SUI in snapshot for {grid}")
+        ns, sport, pk = parts[0], int(parts[1]), parts[2]
+        if str(ext_id) != pk:
+            raise Stage2ReplayInconsistencyError(
+                f"SUI gamePk {pk} != persisted external_game_id {ext_id} for {grid}")
+
+        # Recompute the digest from AUTHORITATIVE persisted immutable content. The digest's
+        # status component is the Stage-2 normalized status (always 'scheduled' for an included
+        # game); game_status itself legitimately transitions downstream and is not used here.
+        try:
+            recomputed = ui.content_digest(
+                source_namespace=ns, sport_id=sport, game_pk=pk,
+                away_team=away, home_team=home,
+                scheduled_start_at=first_pitch,
+                game_status=sched.STATUS_SCHEDULED,
+                source_game_date=g.get("source_game_date"),
+            )
+        except ui.IdentityError as exc:
+            raise Stage2ReplayInconsistencyError(f"cannot recompute digest for {grid}: {exc}")
+        if recomputed != g.get("content_digest"):
+            raise Stage2ReplayInconsistencyError(
+                f"content digest mismatch for {grid}: persisted content diverged from snapshot")
+
+        expected_win_id = ui.window_identity(grid, recomputed)
+        if expected_win_id != g.get("window_identity"):
+            raise Stage2ReplayInconsistencyError(f"window identity mismatch for {grid}")
+
+        rows = _fetch_window_rows_for_run(conn, grid)
+        if not rows:
+            raise Stage2ReplayInconsistencyError(f"missing window record for {grid}")
+        for r in rows:
+            if r[0] != expected_win_id:
+                raise Stage2ReplayInconsistencyError(f"foreign window identity for {grid}")
+            if r[1] not in (g.get("window_action"), ui.WINDOW_ACTION_SUPERSEDED):
+                raise Stage2ReplayInconsistencyError(
+                    f"contradictory window action {r[1]!r} for {grid}")
+        bound = [r for r in rows if r[0] == expected_win_id and r[1] == g.get("window_action")]
+        if len(bound) != 1:
+            raise Stage2ReplayInconsistencyError(
+                f"expected exactly one snapshot-bound window record for {grid}, found {len(bound)}")
+        (_wid, _act, w_start, w_offset, w_cutoff, w_policy, w_ns, w_sport, w_pk) = bound[0]
+        if w_start != first_pitch:
+            raise Stage2ReplayInconsistencyError(f"window start != game first_pitch for {grid}")
+        if w_start + w_offset != w_cutoff:
+            raise Stage2ReplayInconsistencyError(
+                f"window binding start+offset != cutoff for {grid}")
+        if ui.normalize_utc_iso(w_cutoff) != g.get("scheduled_cutoff_at"):
+            raise Stage2ReplayInconsistencyError(f"window cutoff != snapshot cutoff for {grid}")
+        if (w_ns, w_sport, str(w_pk)) != (ns, sport, pk):
+            raise Stage2ReplayInconsistencyError(f"window SUI mismatch for {grid}")
+        if not w_policy:
+            raise Stage2ReplayInconsistencyError(f"window missing policy version for {grid}")
+
+    logger.info("Stage 2 replay: %s reconciled (%d games; content+window verified); no refetch",
+                slate_run_id, len(included))
+    return sorted(set(persisted))
+
 
 def run_stage_2(
     conn: object,
     slate_run_id: str,
     env: dict | None = None,
+    schedule_mode: str = sched.MODE_FIXTURE,
 ) -> list[str]:
-    """Stage 2 — Schedule Retrieval (fixture-based; no live MLB Stats API call).
+    """Stage 2 — schedule retrieval + atomic admission-window persistence.
 
-    Creates one oracle_game_analyses record per fixture game, writes
-    schedule_retrieved and game_analysis_started events, and transitions
-    the slate from schedule_loaded to analysis_in_progress.
+    Fixture mode is the default; live mode is opt-in via schedule_mode (the
+    provider-selection safeguard, PM-1267 §5.1). There is NO silent fixture
+    fallback: a live retrieval failure raises (fail-closed), an empty
+    well-formed response is a legitimate no-games day.
 
-    Args:
-        conn: psycopg2 connection with autocommit=False.
-        slate_run_id: Slate Run ID from Stage 1.
-        env: Optional env dict for kill switch injection.
-
-    Returns:
-        List of game_run_id strings, one per fixture game.
-
-    Raises:
-        KillSwitchHaltError: If kill switch is inactive.
+    The authoritative unit (snapshot event + game rows + window ledger records +
+    slate transition) commits together in one Orchestrator-owned transaction.
+    Retrieval happens OUTSIDE any DB lock; the per-SUI expiry/supersession
+    decision uses a database clock_timestamp() sampled after the slate-row and
+    SUI locks are held. A completed slate replays existence-first with no
+    refetch/rewrite (PM-1269 §5).
     """
     _check_kill_switch(env=env)
 
-    fixtures = load_phase1_fixtures()
-    now = _now_utc()
-    game_run_ids: list[str] = []
+    status, run_date = _read_slate_status_and_date(conn, slate_run_id)
+    if status is None:
+        raise Stage2ScheduleError(f"slate {slate_run_id} not found")
+    if status != "schedule_loaded":
+        # Completed (or advanced) slate → existence-first replay, no retrieval.
+        return _reconcile_completed_stage2(conn, slate_run_id)
 
-    for record in fixtures:
-        validate_fixture_record(record)
-        game_pk = get_game_pk(record)
-        game_run_id = generate_game_run_id(
-            slate_run_id,
-            record["away_team"],
-            record["home_team"],
-            game_pk,
-        )
+    requested_slate_date = run_date.isoformat()
+    # Retrieval OUTSIDE any lock/transaction persistence (PM-1269 §3.5). Fail
+    # closed on transport/parse errors; never fall back to fixtures.
+    snapshot = sched.retrieve(schedule_mode, requested_slate_date)
 
-        first_pitch_dt = datetime.fromisoformat(
-            record["first_pitch_time"].replace("Z", "+00:00")
-        )
+    policy = _load_active_mlb_policy(conn)
+    cutoff_offset = policy.time_cutoff_offset
+    policy_version_id = policy.policy_version_id
+    now = _now_utc()  # event_timestamp only — NOT a gate/expiry instant
 
-        cur = conn.cursor()
-        try:
-            cur.execute(
-                """
-                INSERT INTO oracle_game_analyses
-                    (game_run_id, slate_run_id, external_game_id,
-                     home_team, away_team, first_pitch_time,
-                     game_status, venue)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                """,
-                (
-                    game_run_id,
-                    slate_run_id,
-                    record["external_game_id"],
-                    record["home_team"],
-                    record["away_team"],
-                    first_pitch_dt,
-                    "scheduled",
-                    record["venue"],
-                ),
+    try:
+        # Lock order: slate row FOR UPDATE first (guards concurrent same-slate
+        # Stage 2), then SUI locks in canonical order (cycle-free; PM-1269 §3.1).
+        locked_status = _lock_slate_for_update(conn, slate_run_id)
+        if locked_status != "schedule_loaded":
+            return _reconcile_completed_stage2(conn, slate_run_id)
+
+        included = list(snapshot.included)
+        for s in sorted({g.sui() for g in included}, key=ui.sui_string):
+            _acquire_sui_lock(conn, s)
+
+        game_run_ids: list[str] = []
+        snapshot_games: list[dict] = []
+        for g in included:
+            sui = g.sui()
+            game_run_id = generate_game_run_id(
+                slate_run_id, g.away_team, g.home_team, int(g.game_pk))
+            scheduled_cutoff_at = g.scheduled_start_at + cutoff_offset
+            win_id = ui.window_identity(game_run_id, g.content_digest)
+
+            # Authoritative decision instant AFTER locks (PM-1269 §1).
+            decision_at = _db_clock_now(conn)
+            rows = _fetch_window_rows(conn, sui)
+            claim_run = _fetch_admission_claim(conn, sui)
+            auth = _authoritative_window(rows)
+            action, supersede_prior = ui.decide_window_action(
+                claim_exists=claim_run is not None,
+                authoritative_cutoff=(auth[2] if auth else None),
+                authoritative_retrieved_at=(auth[5] if auth else None),
+                candidate_retrieved_at=snapshot.retrieved_at,
+                decision_at=decision_at,
             )
-        finally:
-            cur.close()
 
-        game_run_ids.append(game_run_id)
+            # Game row (evidence + analysis) is created for every included game;
+            # the window action governs later Stage-8 admission eligibility.
+            cur = conn.cursor()
+            try:
+                cur.execute(
+                    """
+                    INSERT INTO oracle_game_analyses
+                        (game_run_id, slate_run_id, external_game_id,
+                         home_team, away_team, first_pitch_time, game_status, venue)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (game_run_id, slate_run_id, g.game_pk, g.home_team, g.away_team,
+                     g.scheduled_start_at, g.game_status, g.venue),
+                )
+            finally:
+                cur.close()
 
-    record_event(conn, "schedule_retrieved", slate_run_id, now)
+            if supersede_prior and auth is not None:
+                prior = _fetch_window_binding(conn, auth[1])
+                if prior is not None:
+                    _insert_window_row(
+                        conn, sui, auth[1], slate_run_id,
+                        prior[3], prior[4], prior[5], prior[6], prior[7],
+                        ui.WINDOW_ACTION_SUPERSEDED, None, decision_at,
+                        superseded_by_game_run_id=game_run_id,
+                    )
 
-    for game_run_id in game_run_ids:
-        record_event(
-            conn, "game_analysis_started", slate_run_id, now,
-            game_run_id=game_run_id,
-        )
+            _insert_window_row(
+                conn, sui, game_run_id, slate_run_id,
+                g.scheduled_start_at, cutoff_offset, scheduled_cutoff_at,
+                policy_version_id, win_id, action,
+                snapshot.retrieved_at, decision_at,
+            )
 
-    transition_slate_state("schedule_loaded", "analysis_in_progress")
-    _update_slate_status(conn, slate_run_id, "analysis_in_progress")
+            game_run_ids.append(game_run_id)
+            snapshot_games.append({
+                "game_run_id": game_run_id,
+                "sui": ui.sui_string(sui),
+                "content_digest": g.content_digest,
+                "window_identity": win_id,
+                "window_action": action,
+                "scheduled_start_at": ui.normalize_utc_iso(g.scheduled_start_at),
+                "scheduled_cutoff_at": ui.normalize_utc_iso(scheduled_cutoff_at),
+                # source_game_date is a canonical content-digest input (PM-1269 §4.2)
+                # not persisted on the game row; retained here so replay can
+                # recompute the digest from authoritative content.
+                "source_game_date": g.source_game_date,
+                "doubleheader": g.doubleheader,
+            })
 
-    conn.commit()
-    logger.info("Stage 2 complete: %d game records created", len(game_run_ids))
-    return game_run_ids
+        snapshot_payload = {
+            "mode": snapshot.mode,
+            "source": snapshot.source,
+            "source_namespace": snapshot.source_namespace(),
+            "requested_slate_date": requested_slate_date,
+            "retrieved_at": ui.normalize_utc_iso(snapshot.retrieved_at),
+            "empty": snapshot.empty,
+            "included_game_run_ids": game_run_ids,
+            "games": snapshot_games,
+            "excluded": [
+                {"game_pk": e.game_pk, "reason": e.reason, "detail": e.detail}
+                for e in snapshot.excluded
+            ],
+        }
+        record_event(conn, "schedule_retrieved", slate_run_id, now,
+                     payload=snapshot_payload)
+        for game_run_id in game_run_ids:
+            record_event(conn, "game_analysis_started", slate_run_id, now,
+                         game_run_id=game_run_id)
+
+        transition_slate_state("schedule_loaded", "analysis_in_progress")
+        _update_slate_status(conn, slate_run_id, "analysis_in_progress")
+
+        conn.commit()
+        logger.info("Stage 2 complete: mode=%s %d game records created",
+                    schedule_mode, len(game_run_ids))
+        return game_run_ids
+    except Exception:
+        conn.rollback()
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -752,6 +1214,37 @@ def _persist_scheduled_cutoff_with_replay(
     )
 
 
+class Stage5BindingError(OrchestratorError):
+    """Raised when Stage 5 cannot consume a coherent frozen Stage-2 admission-timing
+    binding (fail-closed; PM-1269 §2). Stage 5 never silently substitutes a later
+    active-policy cutoff calculation."""
+
+
+def _reconcile_stage5_binding(conn: object, game_run_id: str, first_pitch_time: object):
+    """Consume and reconcile the frozen Stage-2 window binding for a run (PM-1269 §2.3).
+
+    Returns (scheduled_cutoff_at, policy_version_id) taken from the binding —
+    NOT recomputed from whatever policy is active now. Fails closed on a
+    missing binding, a start/first-pitch mismatch, or a start+offset≠cutoff
+    inconsistency.
+    """
+    binding = _fetch_window_binding(conn, game_run_id)
+    if binding is None:
+        raise Stage5BindingError(
+            f"no authoritative Stage-2 window binding for {game_run_id}")
+    (_ns, _sport, _pk, scheduled_start_at, cutoff_offset,
+     scheduled_cutoff_at, policy_version_id, _win_id) = binding
+    if scheduled_start_at != first_pitch_time:
+        raise Stage5BindingError(
+            f"Stage-2 binding start {scheduled_start_at} != game first_pitch "
+            f"{first_pitch_time} for {game_run_id}")
+    if scheduled_start_at + cutoff_offset != scheduled_cutoff_at:
+        raise Stage5BindingError(
+            f"Stage-2 binding inconsistent for {game_run_id}: "
+            f"{scheduled_start_at} + {cutoff_offset} != {scheduled_cutoff_at}")
+    return scheduled_cutoff_at, policy_version_id
+
+
 def run_stage_5(
     conn: object,
     slate_run_id: str,
@@ -823,10 +1316,14 @@ def run_stage_5(
             _insert_stage5_result(conn, result)
             _insert_preliminary_output(conn, result)
 
-            scheduled_cutoff_at = first_pitch_by_game[game_run_id] + policy.time_cutoff_offset
+            # Consume the frozen Stage-2 admission-timing binding; do NOT
+            # recompute from whatever policy is active now (PM-1269 §2).
+            scheduled_cutoff_at, cutoff_policy_version = _reconcile_stage5_binding(
+                conn, game_run_id, first_pitch_by_game[game_run_id],
+            )
             _persist_scheduled_cutoff_with_replay(
                 conn, game_run_id, slate_run_id, scheduled_cutoff_at,
-                policy.policy_version_id,
+                cutoff_policy_version,
             )
 
             _insert_lifecycle_audit(
@@ -837,7 +1334,7 @@ def run_stage_5(
                 event="multi_model_analysis_completed",
                 detail=(
                     f"stage5_result_id={result.stage5_result_id} "
-                    f"verdict={result.verdict} policy={policy.policy_version_id}"
+                    f"verdict={result.verdict} policy={cutoff_policy_version}"
                 ),
             )
 
@@ -1716,6 +2213,17 @@ def run_stage_8(
         slate_status = _lock_slate_for_update(conn, slate_run_id)
         slate_admitting = slate_status in _STAGE8_ADMITTING_SLATE_STATES
 
+        # Fixed lock order step 2 (PM-1269 §3.1): acquire every needed SUI advisory
+        # lock in canonical order BEFORE per-game admission, so competing Stage-2
+        # and Stage-8 transactions on overlapping games serialize without a cycle.
+        _stage8_suis: dict[str, tuple] = {}
+        for _grid in game_run_ids:
+            _, _, _sui = _fetch_run_window_status(conn, _grid)
+            if _sui is not None:
+                _stage8_suis[_grid] = _sui
+        for _sui in sorted(set(_stage8_suis.values()), key=ui.sui_string):
+            _acquire_sui_lock(conn, _sui)
+
         for game_run_id in game_run_ids:
             # Membership enforcement FIRST (PM-1075): the game's persisted slate_run_id must equal
             # the locked slate before any admission, reconciliation, or related write. A missing
@@ -1775,9 +2283,26 @@ def run_stage_8(
                 ))
                 continue
 
-            # Fresh, timezone-aware decision_time AFTER waits/rereads, immediately before the
-            # first-admission write (PM-1069/PM-1071). Strict gate; equality/after rejects.
-            decision_time = _now_utc()
+            # Cross-revision SUI guard (D-4 / D-5; PM-1269 §1.7) under the SUI lock:
+            # reject an already-claimed (D-4), superseded, expired-prior (D-5), or
+            # non-authoritative run before any admission write.
+            latest_action, is_superseded, sui = _fetch_run_window_status(conn, game_run_id)
+            claim_exists = sui is not None and _fetch_admission_claim(conn, sui) is not None
+            precheck = ui.stage8_precheck(
+                claim_exists=claim_exists,
+                run_window_action=latest_action,
+                run_is_superseded=is_superseded,
+            )
+            if precheck != ui.STAGE8_OK:
+                results.append(s8.Stage8ActivationResult(
+                    game_run_id=game_run_id, outcome=s8.INELIGIBLE, reason=precheck,
+                ))
+                continue
+
+            # Authoritative decision instant from the DATABASE clock, sampled AFTER
+            # all locks are held, immediately before the write (PM-1269 §1). Strict
+            # gate; equality/after rejects.
+            decision_time = _db_clock_now(conn)
             if not s8.is_before_cutoff(decision_time, scheduled_cutoff_at):
                 results.append(s8.Stage8ActivationResult(
                     game_run_id=game_run_id, outcome=s8.INELIGIBLE,
@@ -1795,10 +2320,15 @@ def run_stage_8(
             finally:
                 cur.close()
             try:
+                # All-or-none (PM-1269 §2): the admission row AND the durable
+                # UNIQUE(SUI) claim are inserted within one savepoint. A claim
+                # conflict rolls BOTH back before INELIGIBLE, so a losing run never
+                # retains an admission without owning the claim.
                 _insert_stage8_activation(
                     conn, game_run_id, slate_run_id, stage7_identity, activation_identity,
                     scheduled_cutoff_at, cutoff_rel, limitations, decision_time,
                 )
+                _insert_admission_claim(conn, sui, game_run_id, slate_run_id)
             except Exception as exc:  # unexpected uniqueness conflict → defensive recovery only
                 if getattr(exc, "pgcode", None) != _PG_UNIQUE_VIOLATION:
                     raise
@@ -1807,6 +2337,14 @@ def run_stage_8(
                     cur.execute("ROLLBACK TO SAVEPOINT sp_stage8_admit")
                 finally:
                     cur.close()
+                # A committed claim owned by another revision → D-4 INELIGIBLE (no
+                # losing admission row survives — both writes were rolled back).
+                if sui is not None and _fetch_admission_claim(conn, sui) is not None:
+                    results.append(s8.Stage8ActivationResult(
+                        game_run_id=game_run_id, outcome=s8.INELIGIBLE,
+                        reason=ui.STAGE8_INELIGIBLE_ALREADY_ADMITTED,
+                    ))
+                    continue
                 existing_now = _fetch_stage8_activation(conn, game_run_id)
                 if existing_now is None:
                     # Uniqueness alone is never success; no verified committed admission exists.
