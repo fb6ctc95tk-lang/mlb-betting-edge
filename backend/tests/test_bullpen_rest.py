@@ -608,14 +608,23 @@ class TestPM1327Domain:
         assert f"{br.R_OUT_OF_DOMAIN}:g1" in res.home.missing_reasons   # not dropped/reduced
 
     def test_year_rejection_independent_of_timezone_backend(self, monkeypatch):
+        # PM-1337 portability fix: year/domain rejection must hold under BOTH timezone
+        # backends, regardless of whether the host initially ships IANA data. Each
+        # backend is arranged EXPLICITLY via monkeypatch (auto-restored); the test makes
+        # no assumption about the host's initial br._TORONTO_ZONE state (the prior
+        # `assert br._TORONTO_ZONE is None` depended on the host lacking IANA data and
+        # failed on runners that have it).
         h, a = self._teams()
         as_of_2025 = datetime(2025, 6, 15, 18, 0, tzinfo=_UTC)
-        # (a) real stdlib fallback path (this environment ships no IANA db)
-        assert br._TORONTO_ZONE is None
+        # (a) fallback branch: deliberately arrange NO IANA backend (host-independent).
+        monkeypatch.setattr(br, "_TORONTO_ZONE", None)
+        assert br._TORONTO_ZONE is None                       # arranged state, not host state
         r1 = br.compute_bullpen_rest(request(h, a, as_of=as_of_2025))
         assert not r1.f3_present and br.R_OUT_OF_DOMAIN in r1.home.missing_reasons
-        # (b) controlled zoneinfo-present substitution (fixed EDT stand-in) — same rejection
+        # (b) timezone-backed branch: deliberately arrange a non-None backend (a controlled
+        #     fixed-offset stand-in that exercises _toronto_date's zoneinfo branch).
         monkeypatch.setattr(br, "_TORONTO_ZONE", timezone(timedelta(hours=-4)))
+        assert br._TORONTO_ZONE is not None                   # arranged state
         r2 = br.compute_bullpen_rest(request(h, a, as_of=as_of_2025))
         assert not r2.f3_present and br.R_OUT_OF_DOMAIN in r2.home.missing_reasons
 
